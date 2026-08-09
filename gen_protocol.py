@@ -98,18 +98,31 @@ def _make_seed() -> str:
 
 
 def _log_seed(seed: str, proto_name: str) -> None:
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), "seed": seed, "name": proto_name}
-    with SEED_LOG.open("a") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    try:
+        entry = {"ts": datetime.now(timezone.utc).isoformat(), "seed": seed, "name": proto_name}
+        with SEED_LOG.open("a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception as err:
+        print(f"[gen_protocol]  warning: failed to write seed log: {err}")
 
 
 def _list_seeds() -> None:
     if not SEED_LOG.exists():
         print("No seed log found.")
         return
+    count = 0
     for line in SEED_LOG.read_text().splitlines():
-        d = json.loads(line)
-        print(f"  {d['ts']}  seed={d['seed']}  name={d['name']}")
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+            print(f"  {d['ts']}  seed={d['seed']}  name={d['name']}")
+            count += 1
+        except (json.JSONDecodeError, KeyError):
+            continue
+    if count == 0:
+        print("No valid seed entries found.")
+
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +135,16 @@ PROTO_NOUNS = [
     "ZENITH", "PRISM", "QUORUM", "HELIOS", "SIGMA", "DELTA", "OMEGA", "ECHO",
     "TERRA", "SPECTRA", "RIFT", "NOVA", "LYNX", "COBALT", "TITAN", "FERRO",
     "QUASAR", "HYDRA", "PEGASUS", "ORCA", "ARGON", "NEON", "CHROME", "BASALT",
+    "ASTRA", "SOLAR", "LUNAR", "POLAR", "NIMBUS", "KINETIC", "TEMPEST", "ORION",
+    "VALKYRIE", "PHOENIX", "STARDUST", "NEBULA", "AURORA", "HALO", "RADIAN", "TENSOR",
 ]
 
 PROTO_SUFFIXES = [
     "LINK", "NET", "BUS", "WIRE", "GATE", "CHAN", "SYNC", "FLOW", "HUB", "MUX",
     "CAST", "MESH", "EDGE", "NODE", "CORE", "SPAN", "PATH", "RACK", "PIPE", "SLOT",
+    "GRID", "RING", "FABRIC", "BRIDGE", "TUNNEL", "PORTAL", "SOCKET", "VALVE", "PORT",
 ]
+
 
 FIELD_ADJECTIVES = [
     "src", "dst", "seq", "ack", "flags", "status", "ctrl", "cfg", "data", "payload",
@@ -317,12 +334,14 @@ class ProtocolGenerator:
     def _gen_message(self, proto_name: str,
                      used_ops: set, used_names: set,
                      max_fields: int, pattern: str) -> Message:
-        # Unique opcode
-        for _ in range(1000):
+        if len(used_ops) >= 254:
+            raise ValueError("Cannot generate more than 254 unique opcodes per protocol")
+
+        # Unique opcode selection
+        op = self.rng.randint(0x01, 0xFE)
+        while op in used_ops:
             op = self.rng.randint(0x01, 0xFE)
-            if op not in used_ops:
-                used_ops.add(op)
-                break
+        used_ops.add(op)
 
         verb = self._pick(MSG_VERBS)
         name = self._unique_name(f"{proto_name}_MSG_{verb}", used_names)
@@ -330,7 +349,27 @@ class ProtocolGenerator:
         n_fields = self.rng.randint(1, max_fields)
         fields   = self._gen_fields(n_fields)
 
-        direction = self._pick(["C->S", "S->C", "BIDI"])
+        # Pattern-specific semantic field injection
+        if pattern == "reqrsp":
+            direction = "C->S" if ("REQUEST" in verb or "QUERY" in verb or "FETCH" in verb) else ("S->C" if "RESPONSE" in verb or "ACK" in verb else self._pick(["C->S", "S->C", "BIDI"]))
+            fields.insert(0, Field(name="request_id", ctype="uint32_t", bits=None, array_size=None, comment="Correlation ID matching request to response"))
+        elif pattern == "pubsub":
+            direction = "C->S" if ("SUBSCRIBE" in verb or "REGISTER" in verb) else ("S->C" if "PUBLISH" in verb or "NOTIFY" in verb else self._pick(["C->S", "S->C", "BIDI"]))
+            fields.insert(0, Field(name="topic_id", ctype="uint32_t", bits=None, array_size=None, comment="PubSub channel or topic identifier"))
+        elif pattern == "rpc":
+            direction = "C->S" if ("CALL" in verb or "REQUEST" in verb or "INVOKE" in verb) else ("S->C" if "RETURN" in verb or "RESPONSE" in verb else self._pick(["C->S", "S->C", "BIDI"]))
+            fields.insert(0, Field(name="method_id", ctype="uint16_t", bits=None, array_size=None, comment="RPC procedure method index"))
+            fields.insert(1, Field(name="call_id", ctype="uint32_t", bits=None, array_size=None, comment="RPC invocation sequence ID"))
+        elif pattern == "stream":
+            direction = "C->S" if "PUSH" in verb or "TRANSFER" in verb else self._pick(["C->S", "S->C", "BIDI"])
+            fields.insert(0, Field(name="stream_id", ctype="uint32_t", bits=None, array_size=None, comment="Stream multiplexing identifier"))
+            fields.insert(1, Field(name="chunk_offset", ctype="uint64_t", bits=None, array_size=None, comment="Byte offset within stream"))
+        elif pattern == "fsm":
+            direction = self._pick(["C->S", "S->C", "BIDI"])
+            fields.insert(0, Field(name="state_id", ctype="uint8_t", bits=None, array_size=None, comment="Current state machine phase ID"))
+        else:
+            direction = self._pick(["C->S", "S->C", "BIDI"])
+
         desc_tmpl = [
             f"Initiates a {verb.lower()} transaction",
             f"Signals {verb.lower()} event to peer",
@@ -341,6 +380,7 @@ class ProtocolGenerator:
         desc = self._pick(desc_tmpl)
         return Message(name=name, opcode=op, fields=fields,
                        direction=direction, description=desc)
+
 
     # -- protocol assembly ---------------------------------------------------
 
@@ -478,6 +518,17 @@ class CHeaderEmitter:
             "         (((uint32_t)(x) << 8U)  & 0x00FF0000UL) | \\",
             "         ((uint32_t)(x) << 24U))",
             "#endif",
+            "#ifndef _PROTO_BSWAP64",
+            "#  define _PROTO_BSWAP64(x) \\",
+            "        (((uint64_t)(x) >> 56U)                        | \\",
+            "         (((uint64_t)(x) >> 40U) & 0x000000000000FF00ULL) | \\",
+            "         (((uint64_t)(x) >> 24U) & 0x0000000000FF0000ULL) | \\",
+            "         (((uint64_t)(x) >> 8U)  & 0x00000000FF000000ULL) | \\",
+            "         (((uint64_t)(x) << 8U)  & 0x000000FF00000000ULL) | \\",
+            "         (((uint64_t)(x) << 24U) & 0x0000FF0000000000ULL) | \\",
+            "         (((uint64_t)(x) << 40U) & 0x00FF000000000000ULL) | \\",
+            "         ((uint64_t)(x) << 56U))",
+            "#endif",
             "",
             "/* Detect host byte order at compile time */",
             "#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__",
@@ -485,6 +536,12 @@ class CHeaderEmitter:
             "#else",
             "#  define _PROTO_HOST_IS_BE 0",
             "#endif",
+            "",
+            "/* Portable IEEE-754 float/double conversion (no undefined behavior) */",
+            "static inline uint32_t _proto_f32_to_u32(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }",
+            "static inline float    _proto_u32_to_f32(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }",
+            "static inline uint64_t _proto_f64_to_u64(double d) { uint64_t u; memcpy(&u, &d, sizeof(u)); return u; }",
+            "static inline double   _proto_u64_to_f64(uint64_t u) { double d; memcpy(&d, &u, sizeof(d)); return d; }",
             "",
             f"/* {p.name}: convert multi-byte fields between host and {p.endian}-endian wire order */",
         ]
@@ -494,6 +551,8 @@ class CHeaderEmitter:
                 f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
                 f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? (uint32_t)(x) : _PROTO_BSWAP32(x))",
                 f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
+                f"#define {p.name}_TO_WIRE64(x)   (_PROTO_HOST_IS_BE ? (uint64_t)(x) : _PROTO_BSWAP64(x))",
+                f"#define {p.name}_FROM_WIRE64(x)  {p.name}_TO_WIRE64(x)",
             ]
         else:
             lines += [
@@ -501,7 +560,10 @@ class CHeaderEmitter:
                 f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
                 f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP32(x) : (uint32_t)(x))",
                 f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
+                f"#define {p.name}_TO_WIRE64(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP64(x) : (uint64_t)(x))",
+                f"#define {p.name}_FROM_WIRE64(x)  {p.name}_TO_WIRE64(x)",
             ]
+
         lines += [
             "",
             "/* === Opcode definitions === */",
@@ -602,10 +664,12 @@ class CHeaderEmitter:
             f" * @param  hdr      Header to initialise.",
             f" * @param  opcode   One of {p.name}_MSG_* constants.",
             f" * @param  sess_id  Session identifier.",
+            f" * @param  seq      Monotonic sequence counter for this session/message.",
             f" * @param  pay_len  Payload length in bytes.",
             " */",
             f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                  uint32_t sess_id, uint16_t pay_len);",
+            f"                  uint32_t sess_id, uint32_t seq, uint16_t pay_len);",
+
             "",
             "/**",
             f" * @brief  Compute the CRC-32/ISO-HDLC over a complete {p.name} frame.",
@@ -660,6 +724,8 @@ class CHeaderEmitter:
             "#include <stdint.h>",
             "#include <stdbool.h>",
             "#include <stddef.h>",
+            "#include <string.h>",
+
             "",
             "#ifdef __cplusplus",
             'extern "C" {',
@@ -773,14 +839,13 @@ class CImplEmitter:
             f"}}",
             "",
             f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                  uint32_t sess_id, uint16_t pay_len) {{",
-            f"    static uint32_t _seq = 0U;",
+            f"                  uint32_t sess_id, uint32_t seq, uint16_t pay_len) {{",
             f"    memset(hdr, 0, sizeof(*hdr));",
             f"    hdr->magic       = {p.name}_MAGIC;",
             f"    hdr->version     = {p.name}_VERSION;",
             f"    hdr->opcode      = opcode;",
             f"    hdr->payload_len = pay_len;",
-            f"    hdr->seq         = ++_seq;",
+            f"    hdr->seq         = seq;",
             f"    hdr->session_id  = sess_id;",
             f"    /* Usage:",
             f"     *   fill your payload buffer, then:",
@@ -788,18 +853,20 @@ class CImplEmitter:
             f"     *   {n}_hdr_encode(hdr);  // convert to {p.endian}-endian wire order",
             f"     *   send(hdr, payload); */",
             f"}}",
+
             "",
             f"int {n}_hdr_validate(const {p.header_struct_name} *hdr,",
             f"                     const void *payload, size_t pay_len) {{",
             f"    /* Assumes hdr has already been through {n}_hdr_decode(). */",
-            f"    if (hdr->magic != {p.name}_MAGIC)                   return -1;",
-            f"    if ((hdr->version >> 16) != {p.name}_VERSION_MAJOR) return -2;",
-            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD)        return -3;",
-            f"    if (hdr->payload_len != (uint16_t)pay_len)          return -4;",
-            f"    /* P0-FIX 1: chained CRC over (zeroed-crc32 header) || payload */",
-            f"    if ({n}_frame_crc(hdr, payload, pay_len) != hdr->crc32) return -5;",
+            f"    if (hdr->magic != {p.name}_MAGIC)                   return -1; /* bad magic */",
+            f"    if ((hdr->version >> 16) != {p.name}_VERSION_MAJOR) return -2; /* unsupported major version */",
+            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD)        return -3; /* payload too large */",
+            f"    if (hdr->payload_len != (uint16_t)pay_len)          return -4; /* length mismatch */",
+            f"    if ({n}_frame_crc(hdr, payload, pay_len) != hdr->crc32) return -5; /* CRC mismatch */",
+            f"    if ({n}_opcode_str(hdr->opcode)[0] == '<')          return -6; /* invalid/unknown opcode */",
             f"    return 0;",
             f"}}",
+
             "",
             # ------------------------------------------------------------------
             # P0-FIX 2: explicit encode/decode converts between host and wire order.
@@ -882,8 +949,8 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("-o", "--output",   default=None, help="Output directory")
     ap.add_argument("-n", "--name",     default=None, help="Protocol name prefix")
-    ap.add_argument("-m", "--messages", type=int, default=None, help="Number of messages")
-    ap.add_argument("-f", "--fields",   type=int, default=None, help="Max fields per struct")
+    ap.add_argument("-m", "--messages", type=int, default=None, help="Number of messages (1-254)")
+    ap.add_argument("-f", "--fields",   type=int, default=None, help="Max fields per struct (1-64)")
     ap.add_argument("-p", "--pattern",  default="auto",
                     choices=["auto"] + PATTERNS, help="Protocol pattern")
     ap.add_argument("--no-impl",        action="store_true", help="Skip .c stub")
@@ -904,6 +971,15 @@ def main() -> int:
     if args.list_seeds:
         _list_seeds()
         return 0
+
+    # Validate argument bounds
+    if args.messages is not None and not (1 <= args.messages <= 254):
+        print(f"[gen_protocol]  error: --messages must be between 1 and 254 (got {args.messages})")
+        return 1
+    if args.fields is not None and not (1 <= args.fields <= 64):
+        print(f"[gen_protocol]  error: --fields must be between 1 and 64 (got {args.fields})")
+        return 1
+
 
     seed = args.seed if args.seed else _make_seed()
     rng  = Random(seed)
