@@ -291,7 +291,7 @@ class ProtocolGenerator:
 
         if allow_bitfield and tkey.startswith("u") and self.rng.random() < 0.18:
             bits = self.rng.choice([1, 2, 3, 4])
-        elif allow_array and tkey == "u8" and self.rng.random() < 0.22:
+        elif allow_array and self.rng.random() < 0.22:
             array_size = self.rng.choice([4, 8, 16, 32, 64, 128, 256])
 
         comment = self._field_comment(name, tkey)
@@ -345,10 +345,10 @@ class ProtocolGenerator:
         verb = self._pick(MSG_VERBS)
         name = self._unique_name(f"{proto_name}_MSG_{verb}", used_names)
 
-        # Account for injected semantic fields so total field count respects max_fields
+        # Account for injected semantic fields so total field count strictly respects max_fields
         injected_count = 2 if pattern in ("rpc", "stream") else (1 if pattern in ("reqrsp", "pubsub", "fsm") else 0)
-        n_random = max(1, max_fields - injected_count)
-        fields   = self._gen_fields(n_random)
+        n_random = max(0, max_fields - injected_count)
+        fields   = self._gen_fields(n_random) if n_random > 0 else []
 
         # Pattern-specific semantic field injection
         if pattern == "reqrsp":
@@ -370,6 +370,9 @@ class ProtocolGenerator:
             fields.insert(0, Field(name="state_id", ctype="uint8_t", bits=None, array_size=None, comment="Current state machine phase ID"))
         else:
             direction = self._pick(["C->S", "S->C", "BIDI"])
+
+        if len(fields) > max_fields:
+            fields = fields[:max_fields]
 
         desc_tmpl = [
             f"Initiates a {verb.lower()} transaction",
@@ -671,10 +674,10 @@ class CHeaderEmitter:
             "",
             f"uint32_t {n}_crc32(const void *data, size_t len);",
             f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr, "
-            f"const void *payload, uint16_t payload_len);",
+            f"const void *payload, size_t payload_len);",
             "",
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
-            f"const void *payload, uint16_t payload_len);",
+            f"const void *payload, size_t payload_len);",
             f"const char *{n}_opcode_str(uint8_t opcode);",
         ])
 
@@ -823,7 +826,7 @@ class CSourceEmitter:
             "}",
             "",
             f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr, "
-            f"const void *payload, uint16_t payload_len) {{",
+            f"const void *payload, size_t payload_len) {{",
             f"    {p.header_struct_name} tmp = *hdr;",
             "    tmp.crc32 = 0;  /* zero crc field before computing */",
             f"    {n}_hdr_encode(&tmp);",
@@ -842,12 +845,12 @@ class CSourceEmitter:
             "}",
             "",
             f"int {n}_hdr_validate(const {p.header_struct_name} *hdr, "
-            f"const void *payload, uint16_t payload_len) {{",
+            f"const void *payload, size_t payload_len) {{",
             "    if (!hdr) return -1;",
             f"    if (hdr->magic != {p.name}_MAGIC) return -1;        /* invalid magic */",
             f"    if (hdr->version != {p.name}_VERSION) return -2;    /* version mismatch */",
             f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD) return -3; /* length exceeds max */",
-            "    if (hdr->payload_len != payload_len) return -4;       /* length mismatch */",
+            "    if ((size_t)hdr->payload_len != payload_len) return -4;       /* length mismatch */",
             "    uint32_t expected_crc = "
             f"{n}_frame_crc(hdr, payload, payload_len);",
             "    if (hdr->crc32 != expected_crc) return -5;            /* CRC error */",
@@ -1569,7 +1572,7 @@ class PromelaEmitter:
 
     def _server_fsm(self) -> str:
         connect = next((m for m in self.p.messages if "CONNECT"  in m.name or "HELLO" in m.name), None)
-        acc     = next((m for m in self.p.messages if "ACCEPT"   in m.name), None)
+        acc     = next((m for m in self.p.messages if "ACCEPT"   in m.name or "CONNECTED" in m.name), None)
         ping    = next((m for m in self.p.messages if "PING"     in m.name or "HEARTBEAT" in m.name), None)
         pong    = next((m for m in self.p.messages if "PONG"     in m.name), None)
         close   = next((m for m in self.p.messages if "CLOSE"    in m.name or "BYE" in m.name), None)
