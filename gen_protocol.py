@@ -679,6 +679,13 @@ class CHeaderEmitter:
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len);",
             f"const char *{n}_opcode_str(uint8_t opcode);",
+            "",
+            "/* === Per-message payload serialization prototypes === */",
+            "\n".join([
+                f"void {msg.name.lower()}_encode({msg.name.lower()}_t *msg);\n"
+                f"void {msg.name.lower()}_decode({msg.name.lower()}_t *msg);"
+                for msg in p.messages
+            ]),
         ])
 
 
