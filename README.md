@@ -11,7 +11,7 @@ Generates **independently randomized, collision-resistant C protocols** with cry
 | Magic | SHA-256(name + seed) → 32-bit, zero-bytes patched |
 | Endianness | Wire order (`little` or `big`) for common header and per-message payload structs (`<msg>_encode`, `<msg>_decode`) |
 | Bitfields | Portable: full-width storage + auto-generated `GET_*` / `SET_*` bitmask accessors |
-| Floating Point | Portable IEEE-754 conversion helpers (`_proto_f32_to_u32`, `_proto_u64_to_f64`) + wire byte-swapping |
+| Floating Point | Portable IEEE-754 conversion helpers (`proto_f32_to_u32_`, `proto_u64_to_f64_`) + wire byte-swapping |
 | Boolean Type | Explicit 1-octet wire format (`uint8_t`: 0 = false, 1 = true) |
 | Frame CRC | CRC-32/ISO-HDLC computed over **exact wire-encoded bytes** (`wire_hdr(crc=0) || wire_payload`) |
 | Opcode Validation | Checked against generated opcode table in `hdr_validate()` (returns `-6` on unknown) |

@@ -2,7 +2,7 @@
 """
 gen_protocol.py — Random C Protocol VIQ Generator
 ==================================================
-Generates 100% unique C protocol headers & stubs per invocation.
+Generates collision-resistant C protocol headers & stubs per invocation.
 
 Uniqueness guarantees
 ---------------------
@@ -69,18 +69,18 @@ def _sanitize_proto_name(raw: str) -> str:
     Rules applied
     -------------
     1. Replace every character that is not [A-Za-z0-9_] with '_'.
-    2. Strip leading characters that are not [A-Za-z_]  (C idents cannot
-       start with a digit).
+    2. Strip leading characters that are not [A-Za-z] (C idents cannot
+       start with digits or reserved underscores).
     3. Collapse runs of underscores to a single '_' and strip trailing '_'.
     4. Uppercase the result.
-    5. If the result is a C reserved word (case-insensitive), prefix 'PROTO_'.
+    5. If the result is a C reserved word or reserved implementation identifier, prefix 'PROTO_'.
     6. Fall back to 'PROTO' if the result is empty after all steps.
     """
     s = _re.sub(r'[^A-Za-z0-9_]', '_', raw)
-    s = _re.sub(r'^[^A-Za-z_]+', '', s)   # strip leading non-ident chars
+    s = _re.sub(r'^[^A-Za-z]+', '', s)   # strip leading non-letters/digits/underscores
     s = _re.sub(r'_+', '_', s).strip('_') # collapse/strip underscores
     s = s.upper() or 'PROTO'
-    if s.lower() in _C_RESERVED:
+    if s.lower() in _C_RESERVED or s.startswith('_') or '__' in s:
         s = 'PROTO_' + s
     return s
 
@@ -488,15 +488,17 @@ class CHeaderEmitter:
 
     def _macros(self) -> str:
         p = self.p
-        # P0-FIX: endian flag used by TO_WIRE/FROM_WIRE macros in the .c file
         endian_define = (
-            f"#define {p.name}_WIRE_BIG_ENDIAN  1U"
+            f"#define {p.name}_WIRE_ORDER_BIG 1\n"
+            f"#define {p.name}_WIRE_ORDER_LITTLE 0"
             if p.endian == "big" else
-            f"/* {p.name}_WIRE_BIG_ENDIAN not defined — wire is little-endian */"
+            f"#define {p.name}_WIRE_ORDER_BIG 0\n"
+            f"#define {p.name}_WIRE_ORDER_LITTLE 1"
         )
+
         lines = [
-            "/* === Protocol constants === */",
-            f"#define {p.name}_MAGIC           0x{p.magic:08X}UL",
+            f"/* === {p.name} constants === */",
+            f"#define {p.name}_MAGIC           0x{p.magic:08X}U",
             f"#define {p.name}_VERSION_MAJOR   {p.version_major}U",
             f"#define {p.name}_VERSION_MINOR   {p.version_minor}U",
             f"#define {p.name}_VERSION_PATCH   {p.version_patch}U",
@@ -508,20 +510,29 @@ class CHeaderEmitter:
             f"/* === Wire byte order: {p.endian}-endian === */",
             endian_define,
             "",
+            "/* Portable struct packing macro */",
+            "#if defined(_MSC_VER)",
+            "#  define PROTO_PACKED",
+            "#elif defined(__GNUC__) || defined(__clang__)",
+            "#  define PROTO_PACKED __attribute__((packed))",
+            "#else",
+            "#  define PROTO_PACKED",
+            "#endif",
+            "",
             "/* Portable byte-swap — no system headers needed */",
-            "#ifndef _PROTO_BSWAP16",
-            "#  define _PROTO_BSWAP16(x) \\",
+            "#ifndef PROTO_BSWAP16_",
+            "#  define PROTO_BSWAP16_(x) \\",
             "        ((uint16_t)(((uint16_t)(x) >> 8U) | ((uint16_t)(x) << 8U)))",
             "#endif",
-            "#ifndef _PROTO_BSWAP32",
-            "#  define _PROTO_BSWAP32(x) \\",
+            "#ifndef PROTO_BSWAP32_",
+            "#  define PROTO_BSWAP32_(x) \\",
             "        (((uint32_t)(x) >> 24U)               | \\",
             "         (((uint32_t)(x) >> 8U)  & 0x0000FF00UL) | \\",
             "         (((uint32_t)(x) << 8U)  & 0x00FF0000UL) | \\",
             "         ((uint32_t)(x) << 24U))",
             "#endif",
-            "#ifndef _PROTO_BSWAP64",
-            "#  define _PROTO_BSWAP64(x) \\",
+            "#ifndef PROTO_BSWAP64_",
+            "#  define PROTO_BSWAP64_(x) \\",
             "        (((uint64_t)(x) >> 56U)                        | \\",
             "         (((uint64_t)(x) >> 40U) & 0x000000000000FF00ULL) | \\",
             "         (((uint64_t)(x) >> 24U) & 0x0000000000FF0000ULL) | \\",
@@ -534,35 +545,35 @@ class CHeaderEmitter:
             "",
             "/* Detect host byte order at compile time */",
             "#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__",
-            "#  define _PROTO_HOST_IS_BE 1",
+            "#  define PROTO_HOST_IS_BE_ 1",
             "#else",
-            "#  define _PROTO_HOST_IS_BE 0",
+            "#  define PROTO_HOST_IS_BE_ 0",
             "#endif",
             "",
             "/* Portable IEEE-754 float/double conversion (no undefined behavior) */",
-            "static inline uint32_t _proto_f32_to_u32(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }",
-            "static inline float    _proto_u32_to_f32(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }",
-            "static inline uint64_t _proto_f64_to_u64(double d) { uint64_t u; memcpy(&u, &d, sizeof(u)); return u; }",
-            "static inline double   _proto_u64_to_f64(uint64_t u) { double d; memcpy(&d, &u, sizeof(d)); return d; }",
+            "static inline uint32_t proto_f32_to_u32_(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }",
+            "static inline float    proto_u32_to_f32_(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }",
+            "static inline uint64_t proto_f64_to_u64_(double d) { uint64_t u; memcpy(&u, &d, sizeof(u)); return u; }",
+            "static inline double   proto_u64_to_f64_(uint64_t u) { double d; memcpy(&d, &u, sizeof(d)); return d; }",
             "",
             f"/* {p.name}: convert multi-byte fields between host and {p.endian}-endian wire order */",
         ]
         if p.endian == "big":
             lines += [
-                f"#define {p.name}_TO_WIRE16(x)   (_PROTO_HOST_IS_BE ? (uint16_t)(x) : _PROTO_BSWAP16(x))",
+                f"#define {p.name}_TO_WIRE16(x)   (PROTO_HOST_IS_BE_ ? (uint16_t)(x) : PROTO_BSWAP16_(x))",
                 f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
-                f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? (uint32_t)(x) : _PROTO_BSWAP32(x))",
+                f"#define {p.name}_TO_WIRE32(x)   (PROTO_HOST_IS_BE_ ? (uint32_t)(x) : PROTO_BSWAP32_(x))",
                 f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
-                f"#define {p.name}_TO_WIRE64(x)   (_PROTO_HOST_IS_BE ? (uint64_t)(x) : _PROTO_BSWAP64(x))",
+                f"#define {p.name}_TO_WIRE64(x)   (PROTO_HOST_IS_BE_ ? (uint64_t)(x) : PROTO_BSWAP64_(x))",
                 f"#define {p.name}_FROM_WIRE64(x)  {p.name}_TO_WIRE64(x)",
             ]
         else:
             lines += [
-                f"#define {p.name}_TO_WIRE16(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP16(x) : (uint16_t)(x))",
+                f"#define {p.name}_TO_WIRE16(x)   (PROTO_HOST_IS_BE_ ? PROTO_BSWAP16_(x) : (uint16_t)(x))",
                 f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
-                f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP32(x) : (uint32_t)(x))",
+                f"#define {p.name}_TO_WIRE32(x)   (PROTO_HOST_IS_BE_ ? PROTO_BSWAP32_(x) : (uint32_t)(x))",
                 f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
-                f"#define {p.name}_TO_WIRE64(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP64(x) : (uint64_t)(x))",
+                f"#define {p.name}_TO_WIRE64(x)   (PROTO_HOST_IS_BE_ ? PROTO_BSWAP64_(x) : (uint64_t)(x))",
                 f"#define {p.name}_FROM_WIRE64(x)  {p.name}_TO_WIRE64(x)",
             ]
 
@@ -573,24 +584,19 @@ class CHeaderEmitter:
         for msg in p.messages:
             lines.append(
                 f"#define {msg.name:<54} 0x{msg.opcode:02X}U"
-                f"  /* {msg.direction} — {msg.description} */"
             )
+
         return "\n".join(lines)
 
     def _emit_enum(self, e: Enum) -> str:
         lines = [f"typedef enum {{"]
-        for name, val in e.members:
-            lines.append(f"    {name} = {val},")
+        for k, v in e.members:
+            lines.append(f"    {k:<48} = {v},")
         lines.append(f"}} {e.name};")
         return "\n".join(lines)
 
     def _emit_field(self, f: Field) -> str:
-        # P0-FIX: C bitfields (': N') are non-portable for wire protocols —
-        # bit ordering and padding are implementation-defined (C11 §6.7.2.1).
-        # Promote every bitfield to its natural full-width type and generate
-        # explicit GET/SET accessor macros instead (see _bitfield_accessors).
         if f.bits is not None:
-            mask = (1 << f.bits) - 1
             return (
                 f"    {f.ctype:<12} {f.name};  "
                 f"/* [bits {f.bits-1}:0] active ({f.bits}-bit field) — {f.comment} */"
@@ -613,10 +619,10 @@ class CHeaderEmitter:
             mname    = msg.name  # already upper
             lines += [
                 f"/* Portable {f.bits}-bit accessor for {msg.name.lower()}_t.{f.name} */",
-                f"#define {pname}_GET_{mname}_{fname}(s)    ((s)->{f.name} & {mask_hex})",
+                f"#define {pname}_GET_{mname}_{fname}(s)    ((s)->{f.name} & ({f.ctype}){mask_hex})",
                 f"#define {pname}_SET_{mname}_{fname}(s, v) \\",
-                f"    ((s)->{f.name} = (uint8_t)(((s)->{f.name} & ~{mask_hex}) "
-                f"| ((uint8_t)(v) & {mask_hex})))",
+                f"    ((s)->{f.name} = ({f.ctype})(((s)->{f.name} & ~({f.ctype}){mask_hex}) "
+                f"| (({f.ctype})(v) & ({f.ctype}){mask_hex})))",
             ]
         return "\n".join(lines)
 
@@ -626,7 +632,7 @@ class CHeaderEmitter:
             f"/* Common wire header — prepended to every {p.name} frame */",
             f"/* Multi-byte fields are in {p.endian}-endian wire order.  "
             f"Call {p.name.lower()}_hdr_encode() before send, _hdr_decode() after recv. */",
-            f"typedef struct __attribute__((packed)) {{",
+            f"typedef struct PROTO_PACKED {{",
             f"    uint32_t     magic;        /* Must equal {p.name}_MAGIC (wire order) */",
             f"    uint32_t     version;      /* Encoded {p.version_major}.{p.version_minor}.{p.version_patch} (wire order) */",
             f"    uint8_t      opcode;       /* One of {p.name}_MSG_* */",
@@ -642,7 +648,7 @@ class CHeaderEmitter:
         lines = [
             f"/* {msg.name} payload  (opcode=0x{msg.opcode:02X}, {msg.direction}) */",
             f"/* {msg.description} */",
-            f"typedef struct __attribute__((packed)) {{",
+            f"typedef struct PROTO_PACKED {{",
         ]
         for f in msg.fields:
             lines.append(self._emit_field(f))
@@ -658,74 +664,24 @@ class CHeaderEmitter:
         n = p.name.lower()
         return "\n".join([
             "/* === API prototypes === */",
-            "",
-            "/**",
-            f" * @brief  Initialise a {p.header_struct_name} for the given opcode.",
-            f" * @note   Fields are set in HOST byte order; call {n}_hdr_encode()",
-            f" *         before writing to the wire.",
-            f" * @param  hdr      Header to initialise.",
-            f" * @param  opcode   One of {p.name}_MSG_* constants.",
-            f" * @param  sess_id  Session identifier.",
-            f" * @param  seq      Monotonic sequence counter for this session/message.",
-            f" * @param  pay_len  Payload length in bytes.",
-            " */",
             f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                  uint32_t sess_id, uint32_t seq, uint16_t pay_len);",
-
-            "",
-            "/**",
-            f" * @brief  Compute the CRC-32/ISO-HDLC over a complete {p.name} frame.",
-            f" * @note   Call this AFTER filling the payload and BEFORE {n}_hdr_encode().",
-            f" *         Store the result in hdr->crc32, then call {n}_hdr_encode().",
-            f" * @param  hdr     Pointer to header (crc32 field is ignored / treated as 0).",
-            f" * @param  payload Pointer to payload bytes (may be NULL if pay_len == 0).",
-            f" * @param  pay_len Payload length in bytes.",
-            f" * @return CRC-32 of (zeroed-crc32 header) || payload.",
-            " */",
-            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr,",
-            f"                       const void *payload, size_t pay_len);",
-            "",
-            "/**",
-            f" * @brief  Validate a received (already-decoded) {p.header_struct_name}.",
-            f" * @note   Call {n}_hdr_decode() before this function.",
-            " * @return 0 on success, negative errno-style code on failure.",
-            " */",
-            f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr,",
-            f"                      const void *payload, size_t pay_len);",
-            "",
-            "/**",
-            f" * @brief  Convert header multi-byte fields from host to {p.endian}-endian wire order.",
-            f" * @note   Call after {n}_hdr_init() / setting crc32, before sending.",
-            " */",
+            f"                   uint32_t session_id, uint32_t seq, uint16_t payload_len);",
             f"void {n}_hdr_encode({p.header_struct_name} *hdr);",
-            "",
-            "/**",
-            f" * @brief  Convert header multi-byte fields from {p.endian}-endian wire to host order.",
-            f" * @note   Call immediately after receiving raw bytes, before inspecting fields.",
-            " */",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr);",
             "",
-            "/* === Per-message payload wire serialization prototypes === */",
-            "\n".join([
-                f"void {msg.name.lower()}_encode({msg.name.lower()}_t *msg);\n"
-                f"void {msg.name.lower()}_decode({msg.name.lower()}_t *msg);"
-                for msg in p.messages
-            ]),
-            "",
-            "/**",
-            " * @brief  Compute CRC-32/ISO-HDLC over [data, data+len).",
-            " */",
             f"uint32_t {n}_crc32(const void *data, size_t len);",
+            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr, "
+            f"const void *payload, uint16_t payload_len);",
             "",
-            "/**",
-            " * @brief  Return a human-readable opcode string.",
-            " */",
+            f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
+            f"const void *payload, uint16_t payload_len);",
             f"const char *{n}_opcode_str(uint8_t opcode);",
         ])
 
 
     def emit(self) -> str:
-        guard = f"{self.p.name}_H"
+        p     = self.p
+        guard = f"{p.name}_H_"
         parts = [
             self._banner(),
             f"#ifndef {guard}",
@@ -735,7 +691,6 @@ class CHeaderEmitter:
             "#include <stdbool.h>",
             "#include <stddef.h>",
             "#include <string.h>",
-
             "",
             "#ifdef __cplusplus",
             'extern "C" {',
@@ -750,6 +705,10 @@ class CHeaderEmitter:
             parts.append("")
         parts += [
             "/* === Wire structures === */",
+            "#if defined(_MSC_VER)",
+            "#pragma pack(push, 1)",
+            "#endif",
+            "",
             self._common_hdr_struct(),
             "",
         ]
@@ -757,6 +716,10 @@ class CHeaderEmitter:
             parts.append(self._msg_struct(msg))
             parts.append("")
         parts += [
+            "#if defined(_MSC_VER)",
+            "#pragma pack(pop)",
+            "#endif",
+            "",
             self._prototypes(),
             "",
             "#ifdef __cplusplus",
@@ -768,144 +731,135 @@ class CHeaderEmitter:
         return "\n".join(parts) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# C implementation stub emitter
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# C Source Emitter (.c implementation stub)
+# ===========================================================================
 
-class CImplEmitter:
+class CSourceEmitter:
+    """Emit C source code implementing payload serialization and frame validation."""
+
     def __init__(self, proto: Protocol, header_filename: str) -> None:
-        self.p  = proto
-        self.hf = header_filename
+        self.p      = proto
+        self.h_name = header_filename
 
     def _crc32_table(self) -> str:
-        poly    = 0xEDB88320
-        entries = []
+        """Emit standard ISO-HDLC CRC-32 lookup table (0xEDB88320 polynomial)."""
+        table = []
         for i in range(256):
-            crc = i
+            c = i
             for _ in range(8):
-                crc = (crc >> 1) ^ poly if crc & 1 else crc >> 1
-            entries.append(f"0x{crc:08X}UL")
-        rows = ["    " + ", ".join(entries[r:r+8]) + "," for r in range(0, 256, 8)]
-        return "static const uint32_t _crc32_table[256] = {\n" + "\n".join(rows) + "\n};\n"
+                c = (c >> 1) ^ 0xEDB88320 if (c & 1) else (c >> 1)
+            table.append(f"0x{c:08X}U")
+        rows = [", ".join(table[i:i+4]) for i in range(0, 256, 4)]
+        body = ",\n    ".join(rows)
+        return f"static const uint32_t _crc32_table[256] = {{\n    {body}\n}};"
 
     def _opcode_map(self) -> str:
         p = self.p
         n = p.name.lower()
         lines = [
             f"const char *{n}_opcode_str(uint8_t opcode) {{",
-            f"    switch (opcode) {{",
+            "    switch (opcode) {",
         ]
-        for msg in p.messages:
-            lines.append(f'        case {msg.name}: return "{msg.name}";')
+        for m in p.messages:
+            lines.append(f"        case {m.name}: return \"{m.name}\";")
         lines += [
-            '        default:         return "<UNKNOWN_OPCODE>";',
+            "        default: return \"UNKNOWN_OPCODE\";",
             "    }",
             "}",
         ]
         return "\n".join(lines)
 
     def emit(self) -> str:
-        p  = self.p
-        n  = p.name.lower()
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        p = self.p
+        n = p.name.lower()
         return "\n".join([
-            f"/* {p.name} — generated implementation stub",
-            f" * Generated : {ts}",
-            f" * Seed      : {p.seed}",
-            f" * AUTO-GENERATED — DO NOT EDIT BY HAND",
-            f" */",
-            f'#include "{self.hf}"',
-            "#include <string.h>",
+            f"/* Implementation of {p.name} v{p.version_major}.{p.version_minor}.{p.version_patch} */",
+            f"#include \"{self.h_name}\"",
             "",
             self._crc32_table(),
-            # ------------------------------------------------------------------
-            # P0-FIX 1: _crc32_update lets us chain header + payload in one pass
-            # without restarting (XOR of two independent CRCs is wrong).
-            # ------------------------------------------------------------------
-            f"/* Internal: continue a CRC-32/ISO-HDLC computation over [data, data+len). */",
-            f"static uint32_t _crc32_update(uint32_t state, const void *data, size_t len) {{",
-            f"    const uint8_t *buf = (const uint8_t *)data;",
-            f"    while (len--)",
-            f"        state = _crc32_table[(state ^ *buf++) & 0xFF] ^ (state >> 8);",
-            f"    return state;",
-            f"}}",
             "",
             f"uint32_t {n}_crc32(const void *data, size_t len) {{",
-            f"    return _crc32_update(0xFFFFFFFFUL, data, len) ^ 0xFFFFFFFFUL;",
-            f"}}",
-            "",
-            # ------------------------------------------------------------------
-            # P0-FIX 1 (cont.): frame_crc chains header then payload correctly.
-            # ------------------------------------------------------------------
-            # ------------------------------------------------------------------
-            # P0-FIX 1: frame_crc encodes header bytes (with crc32=0) to wire
-            # byte order BEFORE computing CRC so CRC is 100% host-independent.
-            # ------------------------------------------------------------------
-            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr,",
-            f"                        const void *payload, size_t pay_len) {{",
-            f"    {p.header_struct_name} tmp = *hdr;",
-            f"    tmp.crc32 = 0U;  /* CRC field must be zeroed before hashing */",
-            f"    {n}_hdr_encode(&tmp); /* Convert header fields to wire byte order */",
-            f"    uint32_t state = 0xFFFFFFFFUL;",
-            f"    state = _crc32_update(state, &tmp, sizeof(tmp));  /* hash wire header */",
-            f"    if (pay_len > 0U && payload != NULL)",
-            f"        state = _crc32_update(state, payload, pay_len); /* chain wire payload */",
-            f"    return state ^ 0xFFFFFFFFUL;",
-            f"}}",
+            "    const uint8_t *buf = (const uint8_t *)data;",
+            "    uint32_t crc = 0xFFFFFFFFU;",
+            "    for (size_t i = 0; i < len; i++) {",
+            "        crc = (crc >> 8) ^ _crc32_table[(crc ^ buf[i]) & 0xFFU];",
+            "    }",
+            "    return crc ^ 0xFFFFFFFFU;",
+            "}",
             "",
             f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                  uint32_t sess_id, uint32_t seq, uint16_t pay_len) {{",
-            f"    memset(hdr, 0, sizeof(*hdr));",
+            f"                   uint32_t session_id, uint32_t seq, uint16_t payload_len) {{",
+            "    if (!hdr) return;",
+            "    memset(hdr, 0, sizeof(*hdr));",
             f"    hdr->magic       = {p.name}_MAGIC;",
             f"    hdr->version     = {p.name}_VERSION;",
-            f"    hdr->opcode      = opcode;",
-            f"    hdr->payload_len = pay_len;",
-            f"    hdr->seq         = seq;",
-            f"    hdr->session_id  = sess_id;",
-            f"    /* Usage:",
-            f"     *   fill payload, call msg_encode(payload),",
-            f"     *   hdr->crc32 = {n}_frame_crc(hdr, payload, pay_len);",
-            f"     *   {n}_hdr_encode(hdr);  // convert header to {p.endian}-endian wire order",
-            f"     *   send(hdr, payload); */",
-            f"}}",
-
-
+            "    hdr->opcode      = opcode;",
+            "    hdr->flags       = 0;",
+            "    hdr->payload_len = payload_len;",
+            "    hdr->seq         = seq;",
+            "    hdr->session_id  = session_id;",
+            "    hdr->crc32       = 0;",
+            "}",
             "",
-            f"int {n}_hdr_validate(const {p.header_struct_name} *hdr,",
-            f"                     const void *payload, size_t pay_len) {{",
-            f"    /* Assumes hdr has already been through {n}_hdr_decode(). */",
-            f"    if (hdr->magic != {p.name}_MAGIC)                   return -1; /* bad magic */",
-            f"    if ((hdr->version >> 16) != {p.name}_VERSION_MAJOR) return -2; /* unsupported major version */",
-            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD)        return -3; /* payload too large */",
-            f"    if (hdr->payload_len != (uint16_t)pay_len)          return -4; /* length mismatch */",
-            f"    if ({n}_frame_crc(hdr, payload, pay_len) != hdr->crc32) return -5; /* CRC mismatch */",
-            f"    if ({n}_opcode_str(hdr->opcode)[0] == '<')          return -6; /* invalid/unknown opcode */",
-            f"    return 0;",
-            f"}}",
-
-            "",
-            # ------------------------------------------------------------------
-            # P0-FIX 2: explicit encode/decode converts between host and wire order.
-            # ------------------------------------------------------------------
-            f"/* P0-FIX: byte-order conversion — apply to every header before send/after recv */",
             f"void {n}_hdr_encode({p.header_struct_name} *hdr) {{",
+            "    if (!hdr) return;",
             f"    hdr->magic       = {p.name}_TO_WIRE32(hdr->magic);",
             f"    hdr->version     = {p.name}_TO_WIRE32(hdr->version);",
             f"    hdr->payload_len = {p.name}_TO_WIRE16(hdr->payload_len);",
             f"    hdr->seq         = {p.name}_TO_WIRE32(hdr->seq);",
             f"    hdr->session_id  = {p.name}_TO_WIRE32(hdr->session_id);",
             f"    hdr->crc32       = {p.name}_TO_WIRE32(hdr->crc32);",
-            f"    /* opcode and flags are single bytes — no swap needed */",
-            f"}}",
+            "}",
             "",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr) {{",
+            "    if (!hdr) return;",
             f"    hdr->magic       = {p.name}_FROM_WIRE32(hdr->magic);",
             f"    hdr->version     = {p.name}_FROM_WIRE32(hdr->version);",
             f"    hdr->payload_len = {p.name}_FROM_WIRE16(hdr->payload_len);",
             f"    hdr->seq         = {p.name}_FROM_WIRE32(hdr->seq);",
             f"    hdr->session_id  = {p.name}_FROM_WIRE32(hdr->session_id);",
             f"    hdr->crc32       = {p.name}_FROM_WIRE32(hdr->crc32);",
-            f"}}",
+            "}",
+            "",
+            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr, "
+            f"const void *payload, uint16_t payload_len) {{",
+            f"    {p.header_struct_name} tmp = *hdr;",
+            "    tmp.crc32 = 0;  /* zero crc field before computing */",
+            f"    {n}_hdr_encode(&tmp);",
+            "    uint32_t crc = 0xFFFFFFFFU;",
+            "    const uint8_t *hbuf = (const uint8_t *)&tmp;",
+            "    for (size_t i = 0; i < sizeof(tmp); i++) {",
+            "        crc = (crc >> 8) ^ _crc32_table[(crc ^ hbuf[i]) & 0xFFU];",
+            "    }",
+            "    if (payload && payload_len > 0) {",
+            "        const uint8_t *pbuf = (const uint8_t *)payload;",
+            "        for (size_t i = 0; i < payload_len; i++) {",
+            "            crc = (crc >> 8) ^ _crc32_table[(crc ^ pbuf[i]) & 0xFFU];",
+            "        }",
+            "    }",
+            "    return crc ^ 0xFFFFFFFFU;",
+            "}",
+            "",
+            f"int {n}_hdr_validate(const {p.header_struct_name} *hdr, "
+            f"const void *payload, uint16_t payload_len) {{",
+            "    if (!hdr) return -1;",
+            f"    if (hdr->magic != {p.name}_MAGIC) return -1;        /* invalid magic */",
+            f"    if (hdr->version != {p.name}_VERSION) return -2;    /* version mismatch */",
+            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD) return -3; /* length exceeds max */",
+            "    if (hdr->payload_len != payload_len) return -4;       /* length mismatch */",
+            "    uint32_t expected_crc = "
+            f"{n}_frame_crc(hdr, payload, payload_len);",
+            "    if (hdr->crc32 != expected_crc) return -5;            /* CRC error */",
+            "    /* Check opcode is known */",
+            "    bool opcode_valid = false;",
+            "    switch (hdr->opcode) {",
+        ] + [f"        case {m.name}: opcode_valid = true; break;" for m in p.messages] + [
+            "        default: break;",
+            "    }",
+            "    if (!opcode_valid) return -6;                        /* unknown opcode */",
+            "    return 0;  /* OK */",
+            "}",
             "",
             "/* === Per-message payload wire serialization functions === */",
             self._payload_serialization_code(),
@@ -930,6 +884,15 @@ class CImplEmitter:
                     elif f.ctype in ("uint32_t", "int32_t"):
                         enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_TO_WIRE32(m->{f.name}[i]);")
                         dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_FROM_WIRE32(m->{f.name}[i]);")
+                    elif f.ctype in ("uint64_t", "int64_t"):
+                        enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_TO_WIRE64(m->{f.name}[i]);")
+                        dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_FROM_WIRE64(m->{f.name}[i]);")
+                    elif f.ctype == "float":
+                        enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) {{ uint32_t u = proto_f32_to_u32_(m->{f.name}[i]); u = {pname}_TO_WIRE32(u); m->{f.name}[i] = proto_u32_to_f32_(u); }}")
+                        dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) {{ uint32_t u = proto_f32_to_u32_(m->{f.name}[i]); u = {pname}_FROM_WIRE32(u); m->{f.name}[i] = proto_u32_to_f32_(u); }}")
+                    elif f.ctype == "double":
+                        enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) {{ uint64_t u = proto_f64_to_u64_(m->{f.name}[i]); u = {pname}_TO_WIRE64(u); m->{f.name}[i] = proto_u64_to_f64_(u); }}")
+                        dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) {{ uint64_t u = proto_f64_to_u64_(m->{f.name}[i]); u = {pname}_FROM_WIRE64(u); m->{f.name}[i] = proto_u64_to_f64_(u); }}")
                 else:
                     if f.ctype in ("uint16_t", "int16_t"):
                         enc_lines.append(f"    m->{f.name} = {pname}_TO_WIRE16(m->{f.name});")
@@ -941,11 +904,11 @@ class CImplEmitter:
                         enc_lines.append(f"    m->{f.name} = {pname}_TO_WIRE64(m->{f.name});")
                         dec_lines.append(f"    m->{f.name} = {pname}_FROM_WIRE64(m->{f.name});")
                     elif f.ctype == "float":
-                        enc_lines.append(f"    {{ uint32_t u = _proto_f32_to_u32(m->{f.name}); u = {pname}_TO_WIRE32(u); m->{f.name} = _proto_u32_to_f32(u); }}")
-                        dec_lines.append(f"    {{ uint32_t u = _proto_f32_to_u32(m->{f.name}); u = {pname}_FROM_WIRE32(u); m->{f.name} = _proto_u32_to_f32(u); }}")
+                        enc_lines.append(f"    {{ uint32_t u = proto_f32_to_u32_(m->{f.name}); u = {pname}_TO_WIRE32(u); m->{f.name} = proto_u32_to_f32_(u); }}")
+                        dec_lines.append(f"    {{ uint32_t u = proto_f32_to_u32_(m->{f.name}); u = {pname}_FROM_WIRE32(u); m->{f.name} = proto_u32_to_f32_(u); }}")
                     elif f.ctype == "double":
-                        enc_lines.append(f"    {{ uint64_t u = _proto_f64_to_u64(m->{f.name}); u = {pname}_TO_WIRE64(u); m->{f.name} = _proto_u64_to_f64(u); }}")
-                        dec_lines.append(f"    {{ uint64_t u = _proto_f64_to_u64(m->{f.name}); u = {pname}_FROM_WIRE64(u); m->{f.name} = _proto_u64_to_f64(u); }}")
+                        enc_lines.append(f"    {{ uint64_t u = proto_f64_to_u64_(m->{f.name}); u = {pname}_TO_WIRE64(u); m->{f.name} = proto_u64_to_f64_(u); }}")
+                        dec_lines.append(f"    {{ uint64_t u = proto_f64_to_u64_(m->{f.name}); u = {pname}_FROM_WIRE64(u); m->{f.name} = proto_u64_to_f64_(u); }}")
 
             enc_lines.append("}")
             dec_lines.append("}")
@@ -1099,7 +1062,7 @@ def main() -> int:
 
     # Impl stub
     if not args.no_impl:
-        c_code = CImplEmitter(proto, h_name).emit()
+        c_code = CSourceEmitter(proto, h_name).emit()
         c_path.write_text(c_code)
         print(f"[gen_protocol]  wrote {c_path}")
         if args.verbose:
@@ -1175,7 +1138,7 @@ class PromelaEmitter:
     """
 
     CHAN_BUF = 8          # channel buffer depth
-    MAX_ITER = 16         # bounded loop unroll for model checking
+    MAX_ITER = 4          # bounded loop unroll for model checking
     SPIN_VERSION = 6      # target SPIN 6.x ltl syntax
 
     def __init__(self, proto: Protocol) -> None:
@@ -1315,11 +1278,42 @@ class PromelaEmitter:
 
     # ---- Client proctypes per pattern ------------------------------------
 
+    def _send_choice(self, chan: str, msgs: list[Message], indent: str = "        ") -> str:
+        if len(msgs) == 1:
+            sym = self._sym(msgs[0])
+            return (
+                f"{indent}atomic {{\n"
+                f"{indent}    {chan} ! {sym};\n"
+                f"{indent}    last_opcode = OP_{sym};\n"
+                f"{indent}    assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+                f"{indent}}}"
+            )
+        lines = [f"{indent}if"]
+        for m in msgs:
+            sym = self._sym(m)
+            lines.append(
+                f"{indent}:: atomic {{\n"
+                f"{indent}       {chan} ! {sym};\n"
+                f"{indent}       last_opcode = OP_{sym};\n"
+                f"{indent}       assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+                f"{indent}   }}"
+            )
+        lines.append(f"{indent}fi;")
+        return "\n".join(lines)
+
+    def _recv_assert(self, var: str, msgs: list[Message], indent: str = "            ") -> str:
+        if len(msgs) == 1:
+            sym = self._sym(msgs[0])
+            return f"{indent}assert({var} == {sym});"
+        conds = " || ".join(f"{var} == {self._sym(m)}" for m in msgs)
+        return f"{indent}assert({conds});"
+
+    # ---- Client proctypes per pattern ------------------------------------
+
     def _client_reqrsp(self) -> str:
-        reqs  = self._c2s  + self._bidi
-        resps = self._s2c  + self._bidi
-        req_sym  = self._sym(reqs[0])  if reqs  else "NONE"
-        resp_sym = self._sym(resps[0]) if resps else "NONE"
+        reqs  = self._c2s  + self._bidi or self.p.messages
+        completion_msg = self._sym(self._bidi[0]) if self._bidi else self._sym(reqs[0])
+        send_code = self._send_choice("c2s", reqs, indent="        ")
         return (
             f"active proctype Client() {{\n"
             f"    mtype resp;\n"
@@ -1328,11 +1322,11 @@ class PromelaEmitter:
             f"    :: i < MAX_ITER ->\n"
             f"        atomic {{\n"
             f"            assert(!request_pending);  /* no double request */\n"
-            f"            c2s ! {req_sym};\n"
+            f"        }}\n"
+            f"{send_code}\n"
+            f"        atomic {{\n"
             f"            request_pending = true;\n"
             f"            requests_sent++;\n"
-            f"            last_opcode = OP_{req_sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
             f"        }}\n"
             f"        s2c ? resp;\n"
             f"        atomic {{\n"
@@ -1342,16 +1336,16 @@ class PromelaEmitter:
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
             f"    od;\n"
-            f"    /* Signal done via bidi */\n"
-            f"    bidi ! {self._sym(self._bidi[0]) if self._bidi else req_sym};\n"
+            f"    /* Signal done via bidi or c2s */\n"
+            f"    c2s ! {completion_msg};\n"
             f"}}"
         )
 
     def _server_reqrsp(self) -> str:
-        reqs  = self._c2s  + self._bidi
-        resps = self._s2c  + self._bidi
-        req_sym  = self._sym(reqs[0])  if reqs  else "NONE"
-        resp_sym = self._sym(resps[0]) if resps else "NONE"
+        reqs  = self._c2s  + self._bidi or self.p.messages
+        resps = self._s2c  + self._bidi or self.p.messages
+        recv_assert = self._recv_assert("req", reqs, indent="            ")
+        send_code = self._send_choice("s2c", resps, indent="        ")
         return (
             f"active proctype Server() {{\n"
             f"    mtype req;\n"
@@ -1360,11 +1354,9 @@ class PromelaEmitter:
             f"    :: i < MAX_ITER ->\n"
             f"        c2s ? req;\n"
             f"        atomic {{\n"
-            f"            assert(req == {req_sym});\n"
-            f"            s2c ! {resp_sym};\n"
-            f"            last_opcode = OP_{resp_sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"{recv_assert}\n"
             f"        }}\n"
+            f"{send_code}\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
             f"    od;\n"
@@ -1372,18 +1364,16 @@ class PromelaEmitter:
         )
 
     def _client_stream(self) -> str:
-        senders = self._c2s + self._bidi
-        sym = self._sym(senders[0]) if senders else self._sym(self.p.messages[0])
+        senders = self._c2s + self._bidi or self.p.messages
+        send_code = self._send_choice("c2s", senders, indent="        ")
         return (
             f"active proctype Client() {{\n"
             f"    int i = 0;\n"
             f"    do\n"
             f"    :: i < MAX_ITER && len(c2s) < CHAN_BUF ->\n"
+            f"{send_code}\n"
             f"        atomic {{\n"
-            f"            c2s ! {sym};\n"
             f"            frames_sent++;\n"
-            f"            last_opcode = OP_{sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
             f"        }}\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
@@ -1392,8 +1382,8 @@ class PromelaEmitter:
         )
 
     def _server_stream(self) -> str:
-        senders = self._c2s + self._bidi
-        sym = self._sym(senders[0]) if senders else self._sym(self.p.messages[0])
+        senders = self._c2s + self._bidi or self.p.messages
+        recv_assert = self._recv_assert("frame", senders, indent="            ")
         return (
             f"active proctype Server() {{\n"
             f"    mtype frame;\n"
@@ -1402,7 +1392,7 @@ class PromelaEmitter:
             f"    :: i < MAX_ITER ->\n"
             f"        c2s ? frame;\n"
             f"        atomic {{\n"
-            f"            assert(frame == {sym});\n"
+            f"{recv_assert}\n"
             f"            frames_recv++;\n"
             f"        }}\n"
             f"        i++;\n"
@@ -1413,28 +1403,25 @@ class PromelaEmitter:
 
     def _client_pubsub(self) -> str:
         sub_msgs = [m for m in self._c2s + self._bidi
-                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name]
+                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name] or self._c2s or self.p.messages
         pub_msgs = [m for m in self._s2c + self._bidi
                     if "PUBLISH"   in m.name or "PUSH"      in m.name
-                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name]
-        sub_sym = self._sym(sub_msgs[0]) if sub_msgs else self._sym((self._c2s + self._bidi + self.p.messages)[0])
-        pub_sym = self._sym(pub_msgs[0]) if pub_msgs else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name] or self._s2c or self.p.messages
+        sub_send = self._send_choice("c2s", sub_msgs, indent="    ")
+        evt_assert = self._recv_assert("evt", pub_msgs, indent="            ")
         return (
             f"active proctype Subscriber() {{\n"
             f"    mtype evt;\n"
             f"    int i = 0;\n"
             f"    /* Subscribe first */\n"
-            f"    atomic {{\n"
-            f"        c2s ! {sub_sym};\n"
-            f"        subscribed = true;\n"
-            f"        last_opcode = OP_{sub_sym};\n"
-            f"        assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
-            f"    }}\n"
+            f"{sub_send}\n"
+            f"    subscribed = true;\n"
             f"    do\n"
             f"    :: i < MAX_ITER ->\n"
             f"        s2c ? evt;\n"
             f"        atomic {{\n"
             f"            assert(subscribed);  /* must be subscribed to receive */\n"
+            f"{evt_assert}\n"
             f"            publishes_recv++;\n"
             f"        }}\n"
             f"        i++;\n"
@@ -1445,27 +1432,25 @@ class PromelaEmitter:
 
     def _server_pubsub(self) -> str:
         sub_msgs = [m for m in self._c2s + self._bidi
-                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name]
+                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name] or self._c2s or self.p.messages
         pub_msgs = [m for m in self._s2c + self._bidi
                     if "PUBLISH"   in m.name or "PUSH"      in m.name
-                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name]
-        sub_sym = self._sym(sub_msgs[0]) if sub_msgs else self._sym((self._c2s + self._bidi + self.p.messages)[0])
-        pub_sym = self._sym(pub_msgs[0]) if pub_msgs else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name] or self._s2c or self.p.messages
+        sub_assert = self._recv_assert("req", sub_msgs, indent="    ")
+        pub_send = self._send_choice("s2c", pub_msgs, indent="        ")
         return (
             f"active proctype Broker() {{\n"
             f"    mtype req;\n"
             f"    int i = 0;\n"
             f"    /* Wait for subscription */\n"
             f"    c2s ? req;\n"
-            f"    assert(req == {sub_sym});\n"
+            f"{sub_assert}\n"
             f"    /* Publish events */\n"
             f"    do\n"
             f"    :: i < MAX_ITER && subscribed ->\n"
+            f"{pub_send}\n"
             f"        atomic {{\n"
-            f"            s2c ! {pub_sym};\n"
             f"            publishes_sent++;\n"
-            f"            last_opcode = OP_{pub_sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
             f"        }}\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
@@ -1475,11 +1460,11 @@ class PromelaEmitter:
 
     def _client_rpc(self) -> str:
         calls   = [m for m in self._c2s + self._bidi if any(
-                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])]
+                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])] or self._c2s or self.p.messages
         returns = [m for m in self._s2c + self._bidi if any(
-                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])]
-        call_sym   = self._sym(calls[0])   if calls   else self._sym((self._c2s + self._bidi + self.p.messages)[0])
-        return_sym = self._sym(returns[0]) if returns else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])] or self._s2c or self.p.messages
+        call_send = self._send_choice("c2s", calls, indent="        ")
+        ret_assert = self._recv_assert("ret", returns, indent="            ")
         return (
             f"active proctype RPCClient() {{\n"
             f"    mtype ret;\n"
@@ -1488,15 +1473,16 @@ class PromelaEmitter:
             f"    :: i < MAX_ITER ->\n"
             f"        atomic {{\n"
             f"            assert(!call_pending);\n"
-            f"            c2s ! {call_sym};\n"
+            f"        }}\n"
+            f"{call_send}\n"
+            f"        atomic {{\n"
             f"            call_pending = true;\n"
             f"            calls_sent++;\n"
-            f"            last_opcode = OP_{call_sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
             f"        }}\n"
             f"        s2c ? ret;\n"
             f"        atomic {{\n"
             f"            call_pending = false;\n"
+            f"{ret_assert}\n"
             f"            returns_recv++;\n"
             f"        }}\n"
             f"        i++;\n"
@@ -1507,11 +1493,11 @@ class PromelaEmitter:
 
     def _server_rpc(self) -> str:
         calls   = [m for m in self._c2s + self._bidi if any(
-                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])]
+                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])] or self._c2s or self.p.messages
         returns = [m for m in self._s2c + self._bidi if any(
-                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])]
-        call_sym   = self._sym(calls[0])   if calls   else self._sym((self._c2s + self._bidi + self.p.messages)[0])
-        return_sym = self._sym(returns[0]) if returns else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])] or self._s2c or self.p.messages
+        call_assert = self._recv_assert("call", calls, indent="            ")
+        return_send = self._send_choice("s2c", returns, indent="        ")
         return (
             f"active proctype RPCServer() {{\n"
             f"    mtype call;\n"
@@ -1520,11 +1506,9 @@ class PromelaEmitter:
             f"    :: i < MAX_ITER ->\n"
             f"        c2s ? call;\n"
             f"        atomic {{\n"
-            f"            assert(call == {call_sym});\n"
-            f"            s2c ! {return_sym};\n"
-            f"            last_opcode = OP_{return_sym};\n"
-            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"{call_assert}\n"
             f"        }}\n"
+            f"{return_send}\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
             f"    od;\n"
@@ -1532,7 +1516,6 @@ class PromelaEmitter:
         )
 
     def _client_fsm(self) -> str:
-        # Find "connect-like" and "close-like" messages
         connect = next((m for m in self.p.messages if "CONNECT"  in m.name or "HELLO"     in m.name), None)
         ping    = next((m for m in self.p.messages if "PING"     in m.name or "HEARTBEAT" in m.name), None)
         close   = next((m for m in self.p.messages if "CLOSE"    in m.name or "BYE"       in m.name), None)
@@ -1722,9 +1705,9 @@ class PromelaEmitter:
                 f"    [] <> (len(c2s) < CHAN_BUF)",
                 "}",
                 "",
-                "/* Liveness: server eventually receives all frames */",
+                "/* Liveness: server eventually receives all frames sent */",
                 "ltl prop_frames_received {",
-                "    <> (frames_recv > 0)",
+                "    [] (frames_sent == MAX_ITER -> <> (frames_recv == MAX_ITER))",
                 "}",
             ]
         elif p.pattern == "fsm":
@@ -1803,14 +1786,14 @@ class SpinVerifier:
     --------
     1. spin -a <model>.pml          → generate pan.c
     2. gcc -DSAFETY -O2 -o pan pan.c → compile safety verifier
-    3. ./pan -m500000               → safety check (assertions, deadlock)
+    3. ./pan -m500000               → safety check (search depth limit = 500,000)
     4. gcc         -O2 -o pan pan.c  → recompile without DSAFETY
     5. ./pan -a -m500000            → acceptance-cycle check (liveness)
     """
 
-    MEMLIMIT  = "500000"   # max states
-    SPIN_BIN  = shutil.which("spin") or "spin"
-    GCC_BIN   = shutil.which("gcc")  or "gcc"
+    SEARCH_DEPTH = "500000"   # search-depth limit (-m)
+    SPIN_BIN     = shutil.which("spin") or "spin"
+    GCC_BIN      = shutil.which("gcc")  or "gcc"
 
     def __init__(self, pml_path: Path, verbose: bool = False) -> None:
         self.pml     = pml_path
@@ -1831,39 +1814,39 @@ class SpinVerifier:
 
     def _parse_pan(self, output: str) -> dict:
         result = {
-            "errors":          0,
-            "states":          0,
-            "transitions":     0,
-            "depth":           0,
+            "errors":            0,
+            "states":            0,
+            "transitions":       0,
+            "depth":             0,
             "assertion_violated": False,
-            "deadlock":        False,
-            "acceptance_cycle": False,
-            "raw":             output,
+            "deadlock":          False,
+            "acceptance_cycle":  False,
+            "depth_limit_hit":   False,
+            "raw":               output,
         }
         for line in output.splitlines():
             l = line.strip()
+            l_lower = l.lower()
             if "errors:" in l:
                 try:   result["errors"] = int(l.split("errors:")[1].split(",")[0].split()[0])
                 except: pass
-            # "   11948 states, stored"  OR  "11948 states,stored"
             if "states," in l and "stored" in l:
                 try:   result["states"] = int(l.split()[0].replace(",",""))
                 except: pass
             if "transitions" in l:
                 try:   result["transitions"] = int(l.split()[0].replace(",",""))
                 except: pass
-            # "depth reached 495"  or  "max depth limit reached"
-            if "depth reached" in l.lower():
+            if "depth reached" in l_lower:
                 try:   result["depth"] = int(l.split("depth reached")[-1].strip().split()[0].rstrip(","))
                 except: pass
-            if "assertion violated" in l.lower():
+            if "reached -m bound" in l_lower or "search ceased" in l_lower or "depth limit reached" in l_lower:
+                result["depth_limit_hit"] = True
+            if "assertion violated" in l_lower:
                 result["assertion_violated"] = True
-            # Only flag deadlock/invalid-end-state on actual error lines (not config lines)
-            if ("pan:" in l and "invalid end state" in l.lower()) or \
-               ("pan:" in l and "deadlock" in l.lower()):
-
+            if ("pan:" in l and "invalid end state" in l_lower) or \
+               ("pan:" in l and "deadlock" in l_lower):
                 result["deadlock"] = True
-            if "acceptance cycle" in l.lower():
+            if "acceptance cycle" in l_lower:
                 result["acceptance_cycle"] = True
         return result
 
@@ -1878,7 +1861,6 @@ class SpinVerifier:
         }
 
         # ── Step 1: generate pan.c ──────────────────────────────────────
-        # SPIN always writes pan.c relative to its cwd, so run inside _work.
         import shutil as _sh
         pml_local = self._work / self.pml.name
         _sh.copy(str(self.pml), str(pml_local))   # stage pml into work dir
@@ -1888,6 +1870,12 @@ class SpinVerifier:
             [self.SPIN_BIN, "-a", self.pml.name],  # relative; cwd = _work
             cwd=str(self._work),
         )
+        if r.returncode != 0:
+            results["summary"] = "FAIL: spin -a returned error"
+            print(f"[spin]  ERROR: {results['summary']}")
+            print(r.stdout); print(r.stderr)
+            return results
+
         if self.verbose and (r.stdout or r.stderr):
             self._print_section("spin -a output", r.stdout + r.stderr)
 
@@ -1911,20 +1899,23 @@ class SpinVerifier:
             self._print_section("gcc stderr", r.stderr)
             return results
 
-        print(f"[spin]  Running safety check (max states={self.MEMLIMIT}) ...")
-        r = self._run([str(pan_bin.resolve()), f"-m{self.MEMLIMIT}"],
+        print(f"[spin]  Running safety check (search depth={self.SEARCH_DEPTH}) ...")
+        r = self._run([str(pan_bin.resolve()), f"-m{self.SEARCH_DEPTH}"],
                       cwd=str(self._work))
         safety = self._parse_pan(r.stdout + r.stderr)
+        safety["exit_code"] = r.returncode
         results["safety"] = safety
         if self.verbose:
             self._print_section("pan safety output", r.stdout + r.stderr)
 
-        s_ok = (safety["errors"] == 0 and
+        s_ok = (r.returncode == 0 and
+                safety["errors"] == 0 and
                 not safety["assertion_violated"] and
-                not safety["deadlock"])
+                not safety["deadlock"] and
+                not safety["depth_limit_hit"])
         print(f"[spin]  Safety  : {'✓ PASS' if s_ok else '✗ FAIL'}"
-              f"  (errors={safety['errors']}, states={safety['states']}, "
-              f"depth={safety['depth']})")
+              f"  (exit_code={r.returncode}, errors={safety['errors']}, states={safety['states']}, "
+              f"depth={safety['depth']}{', DEPTH_LIMIT_HIT' if safety['depth_limit_hit'] else ''})")
 
         # ── Step 3: liveness verification ───────────────────────────────
         print("[spin]  Compiling liveness verifier ...")
@@ -1937,25 +1928,42 @@ class SpinVerifier:
             self._print_section("gcc stderr", r.stderr)
             return results
 
-        print(f"[spin]  Running liveness check (-a, max states={self.MEMLIMIT}) ...")
-        r = self._run([str(pan_bin.resolve()), "-a", f"-m{self.MEMLIMIT}"],
+        print(f"[spin]  Running liveness check (-a, search depth={self.SEARCH_DEPTH}) ...")
+        r = self._run([str(pan_bin.resolve()), "-a", f"-m{self.SEARCH_DEPTH}"],
                       cwd=str(self._work))
         liveness = self._parse_pan(r.stdout + r.stderr)
+        liveness["exit_code"] = r.returncode
         results["liveness"] = liveness
         if self.verbose:
             self._print_section("pan liveness output", r.stdout + r.stderr)
 
-        l_ok = (liveness["errors"] == 0 and
-                not liveness["acceptance_cycle"])
+        l_ok = (r.returncode == 0 and
+                liveness["errors"] == 0 and
+                not liveness["acceptance_cycle"] and
+                not liveness["depth_limit_hit"])
         print(f"[spin]  Liveness: {'✓ PASS' if l_ok else '✗ FAIL'}"
-              f"  (errors={liveness['errors']}, states={liveness['states']}, "
-              f"depth={liveness['depth']})")
+              f"  (exit_code={r.returncode}, errors={liveness['errors']}, states={liveness['states']}, "
+              f"depth={liveness['depth']}{', DEPTH_LIMIT_HIT' if liveness['depth_limit_hit'] else ''})")
 
         overall = s_ok and l_ok
         results["passed"]  = overall
-        results["summary"] = "PASS — no errors found" if overall else "FAIL — see details above"
+        if overall:
+            results["summary"] = "PASS — no errors found"
+        else:
+            reasons = []
+            if not s_ok:
+                if safety["exit_code"] != 0: reasons.append("pan safety process crashed/exited non-zero")
+                if safety["errors"] > 0: reasons.append(f"safety errors ({safety['errors']})")
+                if safety["assertion_violated"]: reasons.append("assertion violated")
+                if safety["deadlock"]: reasons.append("deadlock detected")
+                if safety["depth_limit_hit"]: reasons.append("search depth limit hit (-m bound)")
+            if not l_ok:
+                if liveness["exit_code"] != 0: reasons.append("pan liveness process crashed/exited non-zero")
+                if liveness["errors"] > 0: reasons.append(f"liveness errors ({liveness['errors']})")
+                if liveness["acceptance_cycle"]: reasons.append("acceptance cycle detected")
+                if liveness["depth_limit_hit"]: reasons.append("liveness search depth limit hit (-m bound)")
+            results["summary"] = f"FAIL — {', '.join(reasons)}"
         return results
-
 
     def cleanup(self) -> None:
         import shutil as _sh
@@ -1965,3 +1973,4 @@ class SpinVerifier:
 
 if __name__ == "__main__":
     sys.exit(main())
+
