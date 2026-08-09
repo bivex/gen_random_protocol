@@ -703,6 +703,13 @@ class CHeaderEmitter:
             " */",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr);",
             "",
+            "/* === Per-message payload wire serialization prototypes === */",
+            "\n".join([
+                f"void {msg.name.lower()}_encode({msg.name.lower()}_t *msg);\n"
+                f"void {msg.name.lower()}_decode({msg.name.lower()}_t *msg);"
+                for msg in p.messages
+            ]),
+            "",
             "/**",
             " * @brief  Compute CRC-32/ISO-HDLC over [data, data+len).",
             " */",
@@ -713,6 +720,7 @@ class CHeaderEmitter:
             " */",
             f"const char *{n}_opcode_str(uint8_t opcode);",
         ])
+
 
     def emit(self) -> str:
         guard = f"{self.p.name}_H"
@@ -827,14 +835,19 @@ class CImplEmitter:
             # ------------------------------------------------------------------
             # P0-FIX 1 (cont.): frame_crc chains header then payload correctly.
             # ------------------------------------------------------------------
+            # ------------------------------------------------------------------
+            # P0-FIX 1: frame_crc encodes header bytes (with crc32=0) to wire
+            # byte order BEFORE computing CRC so CRC is 100% host-independent.
+            # ------------------------------------------------------------------
             f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr,",
             f"                        const void *payload, size_t pay_len) {{",
             f"    {p.header_struct_name} tmp = *hdr;",
             f"    tmp.crc32 = 0U;  /* CRC field must be zeroed before hashing */",
+            f"    {n}_hdr_encode(&tmp); /* Convert header fields to wire byte order */",
             f"    uint32_t state = 0xFFFFFFFFUL;",
-            f"    state = _crc32_update(state, &tmp, sizeof(tmp));  /* hash header */",
-            f"    if (pay_len > 0U)",
-            f"        state = _crc32_update(state, payload, pay_len); /* chain payload */",
+            f"    state = _crc32_update(state, &tmp, sizeof(tmp));  /* hash wire header */",
+            f"    if (pay_len > 0U && payload != NULL)",
+            f"        state = _crc32_update(state, payload, pay_len); /* chain wire payload */",
             f"    return state ^ 0xFFFFFFFFUL;",
             f"}}",
             "",
@@ -848,11 +861,12 @@ class CImplEmitter:
             f"    hdr->seq         = seq;",
             f"    hdr->session_id  = sess_id;",
             f"    /* Usage:",
-            f"     *   fill your payload buffer, then:",
+            f"     *   fill payload, call msg_encode(payload),",
             f"     *   hdr->crc32 = {n}_frame_crc(hdr, payload, pay_len);",
-            f"     *   {n}_hdr_encode(hdr);  // convert to {p.endian}-endian wire order",
+            f"     *   {n}_hdr_encode(hdr);  // convert header to {p.endian}-endian wire order",
             f"     *   send(hdr, payload); */",
             f"}}",
+
 
             "",
             f"int {n}_hdr_validate(const {p.header_struct_name} *hdr,",
@@ -891,8 +905,53 @@ class CImplEmitter:
             f"    hdr->crc32       = {p.name}_FROM_WIRE32(hdr->crc32);",
             f"}}",
             "",
+            "/* === Per-message payload wire serialization functions === */",
+            self._payload_serialization_code(),
+            "",
             self._opcode_map(),
         ]) + "\n"
+
+    def _payload_serialization_code(self) -> str:
+        p = self.p
+        pname = p.name
+        blocks = []
+        for msg in p.messages:
+            mname = msg.name.lower()
+            enc_lines = [f"void {mname}_encode({mname}_t *m) {{", "    (void)m;"]
+            dec_lines = [f"void {mname}_decode({mname}_t *m) {{", "    (void)m;"]
+
+            for f in msg.fields:
+                if f.array_size is not None:
+                    if f.ctype in ("uint16_t", "int16_t"):
+                        enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_TO_WIRE16(m->{f.name}[i]);")
+                        dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_FROM_WIRE16(m->{f.name}[i]);")
+                    elif f.ctype in ("uint32_t", "int32_t"):
+                        enc_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_TO_WIRE32(m->{f.name}[i]);")
+                        dec_lines.append(f"    for (size_t i = 0; i < {f.array_size}; i++) m->{f.name}[i] = {pname}_FROM_WIRE32(m->{f.name}[i]);")
+                else:
+                    if f.ctype in ("uint16_t", "int16_t"):
+                        enc_lines.append(f"    m->{f.name} = {pname}_TO_WIRE16(m->{f.name});")
+                        dec_lines.append(f"    m->{f.name} = {pname}_FROM_WIRE16(m->{f.name});")
+                    elif f.ctype in ("uint32_t", "int32_t"):
+                        enc_lines.append(f"    m->{f.name} = {pname}_TO_WIRE32(m->{f.name});")
+                        dec_lines.append(f"    m->{f.name} = {pname}_FROM_WIRE32(m->{f.name});")
+                    elif f.ctype in ("uint64_t", "int64_t"):
+                        enc_lines.append(f"    m->{f.name} = {pname}_TO_WIRE64(m->{f.name});")
+                        dec_lines.append(f"    m->{f.name} = {pname}_FROM_WIRE64(m->{f.name});")
+                    elif f.ctype == "float":
+                        enc_lines.append(f"    {{ uint32_t u = _proto_f32_to_u32(m->{f.name}); u = {pname}_TO_WIRE32(u); m->{f.name} = _proto_u32_to_f32(u); }}")
+                        dec_lines.append(f"    {{ uint32_t u = _proto_f32_to_u32(m->{f.name}); u = {pname}_FROM_WIRE32(u); m->{f.name} = _proto_u32_to_f32(u); }}")
+                    elif f.ctype == "double":
+                        enc_lines.append(f"    {{ uint64_t u = _proto_f64_to_u64(m->{f.name}); u = {pname}_TO_WIRE64(u); m->{f.name} = _proto_u64_to_f64(u); }}")
+                        dec_lines.append(f"    {{ uint64_t u = _proto_f64_to_u64(m->{f.name}); u = {pname}_FROM_WIRE64(u); m->{f.name} = _proto_u64_to_f64(u); }}")
+
+            enc_lines.append("}")
+            dec_lines.append("}")
+            blocks.append("\n".join(enc_lines) + "\n\n" + "\n".join(dec_lines))
+
+        return "\n\n".join(blocks)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -979,6 +1038,10 @@ def main() -> int:
     if args.fields is not None and not (1 <= args.fields <= 64):
         print(f"[gen_protocol]  error: --fields must be between 1 and 64 (got {args.fields})")
         return 1
+    if args.seed is not None and not _re.fullmatch(r"[0-9a-fA-F]{32}", args.seed):
+        print(f"[gen_protocol]  error: --seed must be a 32-character hexadecimal string (got {args.seed!r})")
+        return 1
+
 
 
     seed = args.seed if args.seed else _make_seed()
