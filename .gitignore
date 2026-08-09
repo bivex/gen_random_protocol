@@ -1,0 +1,11 @@
+# Generated protocol output
+out/
+
+# Seed log (local machine state)
+.protocol_seeds.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
