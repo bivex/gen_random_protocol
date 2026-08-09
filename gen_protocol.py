@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 import os
+import re as _re
 import secrets
 import struct
 import sys
@@ -43,6 +44,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 from random import Random
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# C identifier safety
+# ---------------------------------------------------------------------------
+
+_C_RESERVED = frozenset({
+    'auto','break','case','char','const','continue','default','do',
+    'double','else','enum','extern','float','for','goto','if','inline',
+    'int','long','register','restrict','return','short','signed','sizeof',
+    'static','struct','switch','typedef','union','unsigned','void',
+    'volatile','while',
+    # C99/C11 keywords
+    '_bool','_complex','_imaginary','_alignas','_alignof','_atomic',
+    '_generic','_noreturn','_static_assert','_thread_local',
+    # common typedefs that clash
+    'bool','true','false','size_t','ptrdiff_t','intptr_t','uintptr_t',
+})
+
+def _sanitize_proto_name(raw: str) -> str:
+    """
+    Produce a valid C identifier prefix from arbitrary user input.
+
+    Rules applied
+    -------------
+    1. Replace every character that is not [A-Za-z0-9_] with '_'.
+    2. Strip leading characters that are not [A-Za-z_]  (C idents cannot
+       start with a digit).
+    3. Collapse runs of underscores to a single '_' and strip trailing '_'.
+    4. Uppercase the result.
+    5. If the result is a C reserved word (case-insensitive), prefix 'PROTO_'.
+    6. Fall back to 'PROTO' if the result is empty after all steps.
+    """
+    s = _re.sub(r'[^A-Za-z0-9_]', '_', raw)
+    s = _re.sub(r'^[^A-Za-z_]+', '', s)   # strip leading non-ident chars
+    s = _re.sub(r'_+', '_', s).strip('_') # collapse/strip underscores
+    s = s.upper() or 'PROTO'
+    if s.lower() in _C_RESERVED:
+        s = 'PROTO_' + s
+    return s
 
 # ---------------------------------------------------------------------------
 # Entropy / seed management
@@ -203,7 +243,10 @@ class ProtocolGenerator:
 
     def proto_name(self, forced: "str | None") -> str:
         if forced:
-            return forced.upper().replace(" ", "_")
+            clean = _sanitize_proto_name(forced)
+            if clean != forced.upper().replace(' ', '_'):
+                print(f"[gen_protocol]  name sanitized: {forced!r} → {clean!r}")
+            return clean
         noun   = self._pick(PROTO_NOUNS)
         suffix = self._pick(PROTO_SUFFIXES)
         return f"{noun}_{suffix}"
@@ -403,6 +446,12 @@ class CHeaderEmitter:
 
     def _macros(self) -> str:
         p = self.p
+        # P0-FIX: endian flag used by TO_WIRE/FROM_WIRE macros in the .c file
+        endian_define = (
+            f"#define {p.name}_WIRE_BIG_ENDIAN  1U"
+            if p.endian == "big" else
+            f"/* {p.name}_WIRE_BIG_ENDIAN not defined — wire is little-endian */"
+        )
         lines = [
             "/* === Protocol constants === */",
             f"#define {p.name}_MAGIC           0x{p.magic:08X}UL",
@@ -413,6 +462,47 @@ class CHeaderEmitter:
             f"(({p.version_major}U<<16)|({p.version_minor}U<<8)|{p.version_patch}U)",
             f"#define {p.name}_MAX_PAYLOAD     {p.max_payload_size}U",
             f"#define {p.name}_HDR_SIZE        sizeof({p.header_struct_name})",
+            "",
+            f"/* === Wire byte order: {p.endian}-endian === */",
+            endian_define,
+            "",
+            "/* Portable byte-swap — no system headers needed */",
+            "#ifndef _PROTO_BSWAP16",
+            "#  define _PROTO_BSWAP16(x) \\",
+            "        ((uint16_t)(((uint16_t)(x) >> 8U) | ((uint16_t)(x) << 8U)))",
+            "#endif",
+            "#ifndef _PROTO_BSWAP32",
+            "#  define _PROTO_BSWAP32(x) \\",
+            "        (((uint32_t)(x) >> 24U)               | \\",
+            "         (((uint32_t)(x) >> 8U)  & 0x0000FF00UL) | \\",
+            "         (((uint32_t)(x) << 8U)  & 0x00FF0000UL) | \\",
+            "         ((uint32_t)(x) << 24U))",
+            "#endif",
+            "",
+            "/* Detect host byte order at compile time */",
+            "#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__",
+            "#  define _PROTO_HOST_IS_BE 1",
+            "#else",
+            "#  define _PROTO_HOST_IS_BE 0",
+            "#endif",
+            "",
+            f"/* {p.name}: convert multi-byte fields between host and {p.endian}-endian wire order */",
+        ]
+        if p.endian == "big":
+            lines += [
+                f"#define {p.name}_TO_WIRE16(x)   (_PROTO_HOST_IS_BE ? (uint16_t)(x) : _PROTO_BSWAP16(x))",
+                f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
+                f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? (uint32_t)(x) : _PROTO_BSWAP32(x))",
+                f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
+            ]
+        else:
+            lines += [
+                f"#define {p.name}_TO_WIRE16(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP16(x) : (uint16_t)(x))",
+                f"#define {p.name}_FROM_WIRE16(x)  {p.name}_TO_WIRE16(x)",
+                f"#define {p.name}_TO_WIRE32(x)   (_PROTO_HOST_IS_BE ? _PROTO_BSWAP32(x) : (uint32_t)(x))",
+                f"#define {p.name}_FROM_WIRE32(x)  {p.name}_TO_WIRE32(x)",
+            ]
+        lines += [
             "",
             "/* === Opcode definitions === */",
         ]
@@ -431,26 +521,56 @@ class CHeaderEmitter:
         return "\n".join(lines)
 
     def _emit_field(self, f: Field) -> str:
+        # P0-FIX: C bitfields (': N') are non-portable for wire protocols —
+        # bit ordering and padding are implementation-defined (C11 §6.7.2.1).
+        # Promote every bitfield to its natural full-width type and generate
+        # explicit GET/SET accessor macros instead (see _bitfield_accessors).
         if f.bits is not None:
-            return f"    {f.ctype:<12} {f.name} : {f.bits};  /* {f.comment} */"
+            mask = (1 << f.bits) - 1
+            return (
+                f"    {f.ctype:<12} {f.name};  "
+                f"/* [bits {f.bits-1}:0] active ({f.bits}-bit field) — {f.comment} */"
+            )
         elif f.array_size is not None:
             return f"    {f.ctype:<12} {f.name}[{f.array_size}];  /* {f.comment} */"
         else:
             return f"    {f.ctype:<12} {f.name};  /* {f.comment} */"
 
+    def _bitfield_accessors(self, msg: Message) -> str:
+        """Emit portable GET/SET macros for fields that were originally bitfields."""
+        lines = []
+        for f in msg.fields:
+            if f.bits is None:
+                continue
+            mask     = (1 << f.bits) - 1
+            mask_hex = f"0x{mask:02X}U" if mask <= 0xFF else f"0x{mask:04X}U"
+            pname    = self.p.name
+            fname    = f.name.upper()
+            mname    = msg.name  # already upper
+            lines += [
+                f"/* Portable {f.bits}-bit accessor for {msg.name.lower()}_t.{f.name} */",
+                f"#define {pname}_GET_{mname}_{fname}(s)    ((s)->{f.name} & {mask_hex})",
+                f"#define {pname}_SET_{mname}_{fname}(s, v) \\",
+                f"    ((s)->{f.name} = (uint8_t)(((s)->{f.name} & ~{mask_hex}) "
+                f"| ((uint8_t)(v) & {mask_hex})))",
+            ]
+        return "\n".join(lines)
+
     def _common_hdr_struct(self) -> str:
         p = self.p
         return "\n".join([
             f"/* Common wire header — prepended to every {p.name} frame */",
+            f"/* Multi-byte fields are in {p.endian}-endian wire order.  "
+            f"Call {p.name.lower()}_hdr_encode() before send, _hdr_decode() after recv. */",
             f"typedef struct __attribute__((packed)) {{",
-            f"    uint32_t     magic;        /* Must equal {p.name}_MAGIC */",
-            f"    uint32_t     version;      /* Encoded {p.version_major}.{p.version_minor}.{p.version_patch} */",
+            f"    uint32_t     magic;        /* Must equal {p.name}_MAGIC (wire order) */",
+            f"    uint32_t     version;      /* Encoded {p.version_major}.{p.version_minor}.{p.version_patch} (wire order) */",
             f"    uint8_t      opcode;       /* One of {p.name}_MSG_* */",
             f"    uint8_t      flags;        /* Protocol-defined flag bits */",
-            f"    uint16_t     payload_len;  /* Byte length of payload following header */",
-            f"    uint32_t     seq;          /* Monotonic sequence number */",
-            f"    uint32_t     session_id;   /* Session identifier */",
-            f"    uint32_t     crc32;        /* CRC-32 of header (crc=0) + payload */",
+            f"    uint16_t     payload_len;  /* Payload byte length (wire order) */",
+            f"    uint32_t     seq;          /* Monotonic sequence number (wire order) */",
+            f"    uint32_t     session_id;   /* Session identifier (wire order) */",
+            f"    uint32_t     crc32;        /* CRC-32/ISO-HDLC of hdr(crc=0)+payload (wire order) */",
             f"}} {p.header_struct_name};",
         ])
 
@@ -463,6 +583,10 @@ class CHeaderEmitter:
         for f in msg.fields:
             lines.append(self._emit_field(f))
         lines.append(f"}} {msg.name.lower()}_t;")
+        # Append bitfield accessors only if any field needs them
+        accessors = self._bitfield_accessors(msg)
+        if accessors:
+            lines += ["", accessors]
         return "\n".join(lines)
 
     def _prototypes(self) -> str:
@@ -473,6 +597,8 @@ class CHeaderEmitter:
             "",
             "/**",
             f" * @brief  Initialise a {p.header_struct_name} for the given opcode.",
+            f" * @note   Fields are set in HOST byte order; call {n}_hdr_encode()",
+            f" *         before writing to the wire.",
             f" * @param  hdr      Header to initialise.",
             f" * @param  opcode   One of {p.name}_MSG_* constants.",
             f" * @param  sess_id  Session identifier.",
@@ -482,11 +608,36 @@ class CHeaderEmitter:
             f"                  uint32_t sess_id, uint16_t pay_len);",
             "",
             "/**",
-            f" * @brief  Validate a received {p.header_struct_name}.",
+            f" * @brief  Compute the CRC-32/ISO-HDLC over a complete {p.name} frame.",
+            f" * @note   Call this AFTER filling the payload and BEFORE {n}_hdr_encode().",
+            f" *         Store the result in hdr->crc32, then call {n}_hdr_encode().",
+            f" * @param  hdr     Pointer to header (crc32 field is ignored / treated as 0).",
+            f" * @param  payload Pointer to payload bytes (may be NULL if pay_len == 0).",
+            f" * @param  pay_len Payload length in bytes.",
+            f" * @return CRC-32 of (zeroed-crc32 header) || payload.",
+            " */",
+            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr,",
+            f"                       const void *payload, size_t pay_len);",
+            "",
+            "/**",
+            f" * @brief  Validate a received (already-decoded) {p.header_struct_name}.",
+            f" * @note   Call {n}_hdr_decode() before this function.",
             " * @return 0 on success, negative errno-style code on failure.",
             " */",
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr,",
             f"                      const void *payload, size_t pay_len);",
+            "",
+            "/**",
+            f" * @brief  Convert header multi-byte fields from host to {p.endian}-endian wire order.",
+            f" * @note   Call after {n}_hdr_init() / setting crc32, before sending.",
+            " */",
+            f"void {n}_hdr_encode({p.header_struct_name} *hdr);",
+            "",
+            "/**",
+            f" * @brief  Convert header multi-byte fields from {p.endian}-endian wire to host order.",
+            f" * @note   Call immediately after receiving raw bytes, before inspecting fields.",
+            " */",
+            f"void {n}_hdr_decode({p.header_struct_name} *hdr);",
             "",
             "/**",
             " * @brief  Compute CRC-32/ISO-HDLC over [data, data+len).",
@@ -591,13 +742,34 @@ class CImplEmitter:
             "#include <string.h>",
             "",
             self._crc32_table(),
-            f"uint32_t {n}_crc32(const void *data, size_t len) {{",
+            # ------------------------------------------------------------------
+            # P0-FIX 1: _crc32_update lets us chain header + payload in one pass
+            # without restarting (XOR of two independent CRCs is wrong).
+            # ------------------------------------------------------------------
+            f"/* Internal: continue a CRC-32/ISO-HDLC computation over [data, data+len). */",
+            f"static uint32_t _crc32_update(uint32_t state, const void *data, size_t len) {{",
             f"    const uint8_t *buf = (const uint8_t *)data;",
-            f"    uint32_t crc = 0xFFFFFFFFUL;",
-            f"    while (len--) {{",
-            f"        crc = _crc32_table[(crc ^ *buf++) & 0xFF] ^ (crc >> 8);",
-            f"    }}",
-            f"    return crc ^ 0xFFFFFFFFUL;",
+            f"    while (len--)",
+            f"        state = _crc32_table[(state ^ *buf++) & 0xFF] ^ (state >> 8);",
+            f"    return state;",
+            f"}}",
+            "",
+            f"uint32_t {n}_crc32(const void *data, size_t len) {{",
+            f"    return _crc32_update(0xFFFFFFFFUL, data, len) ^ 0xFFFFFFFFUL;",
+            f"}}",
+            "",
+            # ------------------------------------------------------------------
+            # P0-FIX 1 (cont.): frame_crc chains header then payload correctly.
+            # ------------------------------------------------------------------
+            f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr,",
+            f"                        const void *payload, size_t pay_len) {{",
+            f"    {p.header_struct_name} tmp = *hdr;",
+            f"    tmp.crc32 = 0U;  /* CRC field must be zeroed before hashing */",
+            f"    uint32_t state = 0xFFFFFFFFUL;",
+            f"    state = _crc32_update(state, &tmp, sizeof(tmp));  /* hash header */",
+            f"    if (pay_len > 0U)",
+            f"        state = _crc32_update(state, payload, pay_len); /* chain payload */",
+            f"    return state ^ 0xFFFFFFFFUL;",
             f"}}",
             "",
             f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
@@ -610,23 +782,46 @@ class CImplEmitter:
             f"    hdr->payload_len = pay_len;",
             f"    hdr->seq         = ++_seq;",
             f"    hdr->session_id  = sess_id;",
-            f"    /* Caller must compute and set hdr->crc32 after filling payload. */",
+            f"    /* Usage:",
+            f"     *   fill your payload buffer, then:",
+            f"     *   hdr->crc32 = {n}_frame_crc(hdr, payload, pay_len);",
+            f"     *   {n}_hdr_encode(hdr);  // convert to {p.endian}-endian wire order",
+            f"     *   send(hdr, payload); */",
             f"}}",
             "",
             f"int {n}_hdr_validate(const {p.header_struct_name} *hdr,",
             f"                     const void *payload, size_t pay_len) {{",
+            f"    /* Assumes hdr has already been through {n}_hdr_decode(). */",
             f"    if (hdr->magic != {p.name}_MAGIC)                   return -1;",
             f"    if ((hdr->version >> 16) != {p.name}_VERSION_MAJOR) return -2;",
             f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD)        return -3;",
             f"    if (hdr->payload_len != (uint16_t)pay_len)          return -4;",
-            f"    /* Verify CRC over zeroed-crc32 header + payload */",
-            f"    {p.header_struct_name} tmp = *hdr;",
-            f"    tmp.crc32 = 0U;",
-            f"    uint32_t crc = {n}_crc32(&tmp, sizeof(tmp));",
-            f"    if (pay_len > 0U)",
-            f"        crc ^= {n}_crc32(payload, pay_len);",
-            f"    if (crc != hdr->crc32) return -5;",
+            f"    /* P0-FIX 1: chained CRC over (zeroed-crc32 header) || payload */",
+            f"    if ({n}_frame_crc(hdr, payload, pay_len) != hdr->crc32) return -5;",
             f"    return 0;",
+            f"}}",
+            "",
+            # ------------------------------------------------------------------
+            # P0-FIX 2: explicit encode/decode converts between host and wire order.
+            # ------------------------------------------------------------------
+            f"/* P0-FIX: byte-order conversion — apply to every header before send/after recv */",
+            f"void {n}_hdr_encode({p.header_struct_name} *hdr) {{",
+            f"    hdr->magic       = {p.name}_TO_WIRE32(hdr->magic);",
+            f"    hdr->version     = {p.name}_TO_WIRE32(hdr->version);",
+            f"    hdr->payload_len = {p.name}_TO_WIRE16(hdr->payload_len);",
+            f"    hdr->seq         = {p.name}_TO_WIRE32(hdr->seq);",
+            f"    hdr->session_id  = {p.name}_TO_WIRE32(hdr->session_id);",
+            f"    hdr->crc32       = {p.name}_TO_WIRE32(hdr->crc32);",
+            f"    /* opcode and flags are single bytes — no swap needed */",
+            f"}}",
+            "",
+            f"void {n}_hdr_decode({p.header_struct_name} *hdr) {{",
+            f"    hdr->magic       = {p.name}_FROM_WIRE32(hdr->magic);",
+            f"    hdr->version     = {p.name}_FROM_WIRE32(hdr->version);",
+            f"    hdr->payload_len = {p.name}_FROM_WIRE16(hdr->payload_len);",
+            f"    hdr->seq         = {p.name}_FROM_WIRE32(hdr->seq);",
+            f"    hdr->session_id  = {p.name}_FROM_WIRE32(hdr->session_id);",
+            f"    hdr->crc32       = {p.name}_FROM_WIRE32(hdr->crc32);",
             f"}}",
             "",
             self._opcode_map(),
