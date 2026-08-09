@@ -175,7 +175,7 @@ C_TYPES = {
     "i64":  ("int64_t",  8),
     "f32":  ("float",    4),
     "f64":  ("double",   8),
-    "bool": ("bool",     1),
+    "bool": ("uint8_t",  1),  # Explicit 1-octet boolean wire type (0=false, 1=true)
 }
 
 C_TYPE_KEYS     = list(C_TYPES.keys())
@@ -337,7 +337,6 @@ class ProtocolGenerator:
         if len(used_ops) >= 254:
             raise ValueError("Cannot generate more than 254 unique opcodes per protocol")
 
-        # Unique opcode selection
         op = self.rng.randint(0x01, 0xFE)
         while op in used_ops:
             op = self.rng.randint(0x01, 0xFE)
@@ -346,8 +345,10 @@ class ProtocolGenerator:
         verb = self._pick(MSG_VERBS)
         name = self._unique_name(f"{proto_name}_MSG_{verb}", used_names)
 
-        n_fields = self.rng.randint(1, max_fields)
-        fields   = self._gen_fields(n_fields)
+        # Account for injected semantic fields so total field count respects max_fields
+        injected_count = 2 if pattern in ("rpc", "stream") else (1 if pattern in ("reqrsp", "pubsub", "fsm") else 0)
+        n_random = max(1, max_fields - injected_count)
+        fields   = self._gen_fields(n_random)
 
         # Pattern-specific semantic field injection
         if pattern == "reqrsp":
@@ -380,6 +381,7 @@ class ProtocolGenerator:
         desc = self._pick(desc_tmpl)
         return Message(name=name, opcode=op, fields=fields,
                        direction=direction, description=desc)
+
 
 
     # -- protocol assembly ---------------------------------------------------
@@ -958,6 +960,21 @@ class CImplEmitter:
 # JSON manifest helper
 # ---------------------------------------------------------------------------
 
+def _field_wire_size(f: Field) -> int:
+    sizes = {
+        "uint8_t": 1, "int8_t": 1,
+        "uint16_t": 2, "int16_t": 2,
+        "uint32_t": 4, "int32_t": 4, "float": 4,
+        "uint64_t": 8, "int64_t": 8, "double": 8,
+    }
+    unit = sizes.get(f.ctype, 1)
+    if f.array_size is not None:
+        return unit * f.array_size
+    return unit
+
+def _msg_wire_size(m: Message) -> int:
+    return sum(_field_wire_size(f) for f in m.fields)
+
 def protocol_to_dict(proto: Protocol) -> dict:
     return {
         "name":        proto.name,
@@ -981,13 +998,15 @@ def protocol_to_dict(proto: Protocol) -> dict:
                 "opcode":      f"0x{m.opcode:02X}",
                 "direction":   m.direction,
                 "description": m.description,
+                "wire_size":   _msg_wire_size(m),
                 "fields": [
                     {
-                        "name":    f.name,
-                        "type":    f.ctype,
+                        "name":      f.name,
+                        "type":      f.ctype,
+                        "wire_size": _field_wire_size(f),
                         **({"bits": f.bits} if f.bits is not None else {}),
                         **({"array_size": f.array_size} if f.array_size is not None else {}),
-                        "comment": f.comment,
+                        "comment":   f.comment,
                     }
                     for f in m.fields
                 ],
@@ -995,6 +1014,7 @@ def protocol_to_dict(proto: Protocol) -> dict:
             for m in proto.messages
         ],
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -1189,11 +1209,19 @@ class PromelaEmitter:
             f" * Seed     : {p.seed}\n"
             f" * Generated: {ts}\n"
             f" *\n"
+            f" * Verification Scope Notice:\n"
+            f" *   This Promela model performs Bounded Model Checking (BMC)\n"
+            f" *   (up to MAX_ITER = {self.MAX_ITER}) over abstract message control flow,\n"
+            f" *   channel buffer capacity, opcode range invariants, and temporal LTL properties.\n"
+            f" *   Low-level C byte-order serialization & CRC integrity are validated\n"
+            f" *   separately via C implementation stubs and C runtime frame validation.\n"
+            f" *\n"
             f" * Verify with:\n"
             f" *   spin -a {p.name.lower()}.pml\n"
             f" *   gcc -DSAFETY -O2 -o pan pan.c && ./pan -m100000\n"
             f" *   gcc        -O2 -o pan pan.c && ./pan -a -m100000  # liveness\n"
             f" */\n"
+
         )
 
     def _defines(self) -> str:
