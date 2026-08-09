@@ -695,6 +695,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--seed",           default=None, help="Hex seed to reproduce a run")
     ap.add_argument("--list-seeds",     action="store_true", help="List past seeds and exit")
     ap.add_argument("--json",           action="store_true", help="Also write JSON manifest")
+    ap.add_argument("--spin",           action="store_true",
+                    help="Generate Promela model and run SPIN formal verification")
+    ap.add_argument("--no-verify",      action="store_true",
+                    help="With --spin: generate .pml but skip running SPIN")
     ap.add_argument("-v", "--verbose",  action="store_true", help="Print code to stdout")
     return ap.parse_args()
 
@@ -752,6 +756,32 @@ def main() -> int:
         j_path.write_text(json.dumps(protocol_to_dict(proto), indent=2))
         print(f"[gen_protocol]  wrote {j_path}")
 
+    # Promela model + SPIN verification
+    spin_ok = True
+    if args.spin:
+        pml_name = f"{proto.name.lower()}.pml"
+        pml_path = outdir / pml_name
+        pml_code = PromelaEmitter(proto).emit()
+        pml_path.write_text(pml_code)
+        print(f"[gen_protocol]  wrote {pml_path}")
+        if args.verbose:
+            print("\n" + "=" * 78 + "\n" + pml_code)
+
+        if not args.no_verify:
+            verifier = SpinVerifier(pml_path, verbose=args.verbose)
+            vresult  = verifier.verify()
+            spin_ok  = vresult["passed"]
+
+            # Write verification report
+            rpt_path = outdir / f"{proto.name.lower()}_spin_report.json"
+            rpt_path.write_text(json.dumps(vresult, indent=2))
+            print(f"[gen_protocol]  wrote {rpt_path}")
+
+            status = "\033[32m✓ PASS\033[0m" if spin_ok else "\033[31m✗ FAIL\033[0m"
+            print(f"\n[spin]  Overall result: {status} — {vresult['summary']}")
+        else:
+            print("[spin]  Promela model written; --no-verify set, skipping SPIN run.")
+
     print(
         f"\n[gen_protocol]  Protocol : {proto.name}  "
         f"v{proto.version_major}.{proto.version_minor}.{proto.version_patch}\n"
@@ -760,9 +790,815 @@ def main() -> int:
         f"                Endian   : {proto.endian}-endian\n"
         f"                Messages : {len(proto.messages)}\n"
         f"                MaxPay   : {proto.max_payload_size} bytes\n"
-        f"\n  To reproduce: python gen_protocol.py --seed {seed}\n"
+        + (f"                Verified : {'PASS' if spin_ok else 'FAIL (see report)'}\n"
+           if args.spin and not args.no_verify else "")
+        + f"\n  To reproduce: python gen_protocol.py --seed {seed}\n"
     )
-    return 0
+    return 0 if spin_ok else 1
+
+
+
+
+
+
+# ===========================================================================
+# SPIN / Promela formal verification model emitter
+# ===========================================================================
+
+class PromelaEmitter:
+    """
+    Emit a SPIN/Promela model for formal verification of the protocol.
+
+    Verification coverage
+    ---------------------
+    Safety  : opcodes always in valid range; channel never overflows;
+              magic constant consistent; no invalid state transitions (fsm).
+    Liveness: every C->S request eventually matched by S->C response (reqrsp);
+              stream channel never permanently full; pubsub messages only after
+              subscribe; rpc calls always returned; fsm never permanently stuck.
+    Deadlock: SPIN's built-in deadlock (invalid end-state) detection applies
+              automatically.
+    """
+
+    CHAN_BUF = 8          # channel buffer depth
+    MAX_ITER = 16         # bounded loop unroll for model checking
+    SPIN_VERSION = 6      # target SPIN 6.x ltl syntax
+
+    def __init__(self, proto: Protocol) -> None:
+        self.p = proto
+        self._c2s:  list[Message] = []
+        self._s2c:  list[Message] = []
+        self._bidi: list[Message] = []
+        for m in proto.messages:
+            if   m.direction == "C->S": self._c2s.append(m)
+            elif m.direction == "S->C": self._s2c.append(m)
+            else:                       self._bidi.append(m)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _sym(self, msg: Message) -> str:
+        """Promela-safe symbolic name (uppercase, no dashes)."""
+        return msg.name.replace("-", "_")
+
+    def _all_syms(self) -> list[str]:
+        return [self._sym(m) for m in self.p.messages]
+
+    # -- sections ----------------------------------------------------------
+
+    def _banner(self) -> str:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        p  = self.p
+        return (
+            f"/*\n"
+            f" * Promela formal model for {p.name} v{p.version_major}.{p.version_minor}.{p.version_patch}\n"
+            f" * Pattern  : {p.pattern.upper()}\n"
+            f" * Seed     : {p.seed}\n"
+            f" * Generated: {ts}\n"
+            f" *\n"
+            f" * Verify with:\n"
+            f" *   spin -a {p.name.lower()}.pml\n"
+            f" *   gcc -DSAFETY -O2 -o pan pan.c && ./pan -m100000\n"
+            f" *   gcc        -O2 -o pan pan.c && ./pan -a -m100000  # liveness\n"
+            f" */\n"
+        )
+
+    def _defines(self) -> str:
+        p = self.p
+        lines = [
+            f"/* === Protocol constants (all decimal — Promela does not support 0x hex) === */",
+            f"#define PROTO_MAGIC         {p.magic}",
+            f"#define PROTO_VERSION_MAJOR {p.version_major}",
+            f"#define PROTO_VERSION_MINOR {p.version_minor}",
+            f"#define PROTO_MAX_PAYLOAD   {p.max_payload_size}",
+            f"#define CHAN_BUF            {self.CHAN_BUF}",
+            f"#define MAX_ITER           {self.MAX_ITER}",
+            f"",
+            f"/* === Opcode byte values (decimal) === */",
+        ]
+        for m in self.p.messages:
+            lines.append(f"#define OP_{self._sym(m):<50} {m.opcode}")
+        lines += [
+            f"",
+            f"#define OPCODE_MIN 1",
+            f"#define OPCODE_MAX 254",
+        ]
+        return "\n".join(lines)
+
+    def _mtype(self) -> str:
+        syms = self._all_syms()
+        body = ",\n    ".join(syms)
+        # Plain mtype (SPIN 6 scoped mtype:NAME has caveats; plain mtype is portable)
+        return (
+            f"/* === Message type enumeration === */\n"
+            f"mtype = {{\n    {body}\n}};"
+        )
+
+    def _channels(self) -> str:
+        lines = [
+            "/* === Communication channels === */",
+            f"chan c2s  = [{self.CHAN_BUF}] of {{ mtype }};  /* Client -> Server */",
+            f"chan s2c  = [{self.CHAN_BUF}] of {{ mtype }};  /* Server -> Client */",
+            f"chan bidi = [{self.CHAN_BUF}] of {{ mtype }};  /* Bidirectional    */",
+        ]
+        return "\n".join(lines)
+
+    def _shared_vars(self) -> str:
+        p = self.p
+        base = [
+            "/* === Shared state variables === */",
+            "bool session_active  = false;",
+            "bool error_detected  = false;",
+            "byte last_opcode     = 0;",
+            "byte msg_in_flight   = 0;  /* count of unacknowledged messages */",
+        ]
+        if p.pattern == "reqrsp":
+            base += [
+                "bool request_pending = false;",
+                "int  requests_sent   = 0;",
+                "int  responses_recv  = 0;",
+            ]
+        elif p.pattern == "pubsub":
+            base += [
+                "bool subscribed      = false;",
+                "int  publishes_sent  = 0;",
+                "int  publishes_recv  = 0;",
+            ]
+        elif p.pattern == "rpc":
+            base += [
+                "bool call_pending    = false;",
+                "int  calls_sent      = 0;",
+                "int  returns_recv    = 0;",
+            ]
+        elif p.pattern == "stream":
+            base += [
+                "int  frames_sent     = 0;",
+                "int  frames_recv     = 0;",
+            ]
+        elif p.pattern == "fsm":
+            # State machine states as bytes
+            base += [
+                "/* FSM states */",
+                "#define FSM_IDLE         0",
+                "#define FSM_CONNECTING   1",
+                "#define FSM_CONNECTED    2",
+                "#define FSM_NEGOTIATING  3",
+                "#define FSM_TRANSFERRING 4",
+                "#define FSM_DRAINING     5",
+                "#define FSM_CLOSING      6",
+                "#define FSM_CLOSED       7",
+                "#define FSM_ERROR        8",
+                "byte fsm_state = FSM_IDLE;",
+            ]
+        return "\n".join(base)
+
+    # ---- Client proctypes per pattern ------------------------------------
+
+    def _client_reqrsp(self) -> str:
+        reqs  = self._c2s  + self._bidi
+        resps = self._s2c  + self._bidi
+        req_sym  = self._sym(reqs[0])  if reqs  else "NONE"
+        resp_sym = self._sym(resps[0]) if resps else "NONE"
+        return (
+            f"active proctype Client() {{\n"
+            f"    mtype resp;\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        atomic {{\n"
+            f"            assert(!request_pending);  /* no double request */\n"
+            f"            c2s ! {req_sym};\n"
+            f"            request_pending = true;\n"
+            f"            requests_sent++;\n"
+            f"            last_opcode = OP_{req_sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        s2c ? resp;\n"
+            f"        atomic {{\n"
+            f"            request_pending = false;\n"
+            f"            responses_recv++;\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"    /* Signal done via bidi */\n"
+            f"    bidi ! {self._sym(self._bidi[0]) if self._bidi else req_sym};\n"
+            f"}}"
+        )
+
+    def _server_reqrsp(self) -> str:
+        reqs  = self._c2s  + self._bidi
+        resps = self._s2c  + self._bidi
+        req_sym  = self._sym(reqs[0])  if reqs  else "NONE"
+        resp_sym = self._sym(resps[0]) if resps else "NONE"
+        return (
+            f"active proctype Server() {{\n"
+            f"    mtype req;\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        c2s ? req;\n"
+            f"        atomic {{\n"
+            f"            assert(req == {req_sym});\n"
+            f"            s2c ! {resp_sym};\n"
+            f"            last_opcode = OP_{resp_sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _client_stream(self) -> str:
+        senders = self._c2s + self._bidi
+        sym = self._sym(senders[0]) if senders else self._sym(self.p.messages[0])
+        return (
+            f"active proctype Client() {{\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER && len(c2s) < CHAN_BUF ->\n"
+            f"        atomic {{\n"
+            f"            c2s ! {sym};\n"
+            f"            frames_sent++;\n"
+            f"            last_opcode = OP_{sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _server_stream(self) -> str:
+        senders = self._c2s + self._bidi
+        sym = self._sym(senders[0]) if senders else self._sym(self.p.messages[0])
+        return (
+            f"active proctype Server() {{\n"
+            f"    mtype frame;\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        c2s ? frame;\n"
+            f"        atomic {{\n"
+            f"            assert(frame == {sym});\n"
+            f"            frames_recv++;\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _client_pubsub(self) -> str:
+        sub_msgs = [m for m in self._c2s + self._bidi
+                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name]
+        pub_msgs = [m for m in self._s2c + self._bidi
+                    if "PUBLISH"   in m.name or "PUSH"      in m.name
+                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name]
+        sub_sym = self._sym(sub_msgs[0]) if sub_msgs else self._sym((self._c2s + self._bidi + self.p.messages)[0])
+        pub_sym = self._sym(pub_msgs[0]) if pub_msgs else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+        return (
+            f"active proctype Subscriber() {{\n"
+            f"    mtype evt;\n"
+            f"    int i = 0;\n"
+            f"    /* Subscribe first */\n"
+            f"    atomic {{\n"
+            f"        c2s ! {sub_sym};\n"
+            f"        subscribed = true;\n"
+            f"        last_opcode = OP_{sub_sym};\n"
+            f"        assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"    }}\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        s2c ? evt;\n"
+            f"        atomic {{\n"
+            f"            assert(subscribed);  /* must be subscribed to receive */\n"
+            f"            publishes_recv++;\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _server_pubsub(self) -> str:
+        sub_msgs = [m for m in self._c2s + self._bidi
+                    if "SUBSCRIBE" in m.name or "REGISTER" in m.name]
+        pub_msgs = [m for m in self._s2c + self._bidi
+                    if "PUBLISH"   in m.name or "PUSH"      in m.name
+                    or "NOTIFY"    in m.name or "ANNOUNCE"  in m.name]
+        sub_sym = self._sym(sub_msgs[0]) if sub_msgs else self._sym((self._c2s + self._bidi + self.p.messages)[0])
+        pub_sym = self._sym(pub_msgs[0]) if pub_msgs else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+        return (
+            f"active proctype Broker() {{\n"
+            f"    mtype req;\n"
+            f"    int i = 0;\n"
+            f"    /* Wait for subscription */\n"
+            f"    c2s ? req;\n"
+            f"    assert(req == {sub_sym});\n"
+            f"    /* Publish events */\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER && subscribed ->\n"
+            f"        atomic {{\n"
+            f"            s2c ! {pub_sym};\n"
+            f"            publishes_sent++;\n"
+            f"            last_opcode = OP_{pub_sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _client_rpc(self) -> str:
+        calls   = [m for m in self._c2s + self._bidi if any(
+                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])]
+        returns = [m for m in self._s2c + self._bidi if any(
+                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])]
+        call_sym   = self._sym(calls[0])   if calls   else self._sym((self._c2s + self._bidi + self.p.messages)[0])
+        return_sym = self._sym(returns[0]) if returns else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+        return (
+            f"active proctype RPCClient() {{\n"
+            f"    mtype ret;\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        atomic {{\n"
+            f"            assert(!call_pending);\n"
+            f"            c2s ! {call_sym};\n"
+            f"            call_pending = true;\n"
+            f"            calls_sent++;\n"
+            f"            last_opcode = OP_{call_sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        s2c ? ret;\n"
+            f"        atomic {{\n"
+            f"            call_pending = false;\n"
+            f"            returns_recv++;\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _server_rpc(self) -> str:
+        calls   = [m for m in self._c2s + self._bidi if any(
+                    v in m.name for v in ["REQUEST","CALL","INVOKE","QUERY","FETCH"])]
+        returns = [m for m in self._s2c + self._bidi if any(
+                    v in m.name for v in ["RESPONSE","RETURN","RESULT","ACK","REPLY"])]
+        call_sym   = self._sym(calls[0])   if calls   else self._sym((self._c2s + self._bidi + self.p.messages)[0])
+        return_sym = self._sym(returns[0]) if returns else self._sym((self._s2c + self._bidi + self.p.messages)[0])
+        return (
+            f"active proctype RPCServer() {{\n"
+            f"    mtype call;\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        c2s ? call;\n"
+            f"        atomic {{\n"
+            f"            assert(call == {call_sym});\n"
+            f"            s2c ! {return_sym};\n"
+            f"            last_opcode = OP_{return_sym};\n"
+            f"            assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        }}\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _client_fsm(self) -> str:
+        # Find "connect-like" and "close-like" messages
+        connect = next((m for m in self.p.messages if "CONNECT"  in m.name or "HELLO"     in m.name), None)
+        ping    = next((m for m in self.p.messages if "PING"     in m.name or "HEARTBEAT" in m.name), None)
+        close   = next((m for m in self.p.messages if "CLOSE"    in m.name or "BYE"       in m.name), None)
+        acc     = next((m for m in self.p.messages if "ACCEPT"   in m.name or "CONNECTED" in m.name), None)
+        rej     = next((m for m in self.p.messages if "REJECT"   in m.name or "ERROR"     in m.name), None)
+
+        conn_sym  = self._sym(connect) if connect else self._sym(self.p.messages[0])
+        ping_sym  = self._sym(ping)    if ping    else conn_sym
+        close_sym = self._sym(close)   if close   else self._sym(self.p.messages[-1])
+        acc_sym   = self._sym(acc)     if acc     else self._sym(self.p.messages[1] if len(self.p.messages) > 1 else self.p.messages[0])
+        rej_sym   = self._sym(rej)     if rej     else self._sym(self.p.messages[-1])
+
+        return (
+            f"active proctype FSMClient() {{\n"
+            f"    mtype resp;\n"
+            f"    int i;\n"
+            f"    /* IDLE -> CONNECTING */\n"
+            f"    assert(fsm_state == FSM_IDLE);\n"
+            f"    c2s ! {conn_sym};\n"
+            f"    fsm_state = FSM_CONNECTING;\n"
+            f"    /* CONNECTING -> CONNECTED or ERROR */\n"
+            f"    s2c ? resp;\n"
+            f"    if\n"
+            f"    :: resp == {acc_sym} ->\n"
+            f"        fsm_state = FSM_CONNECTED;\n"
+            f"        session_active = true;\n"
+            f"    :: resp == {rej_sym} ->\n"
+            f"        fsm_state = FSM_ERROR;\n"
+            f"        error_detected = true;\n"
+            f"        goto done;\n"
+            f"    fi;\n"
+            f"    /* CONNECTED: exchange data */\n"
+            f"    i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER && fsm_state == FSM_CONNECTED ->\n"
+            f"        c2s ! {ping_sym};\n"
+            f"        last_opcode = OP_{ping_sym};\n"
+            f"        assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"    /* CONNECTED -> CLOSING */\n"
+            f"    fsm_state = FSM_CLOSING;\n"
+            f"    c2s ! {close_sym};\n"
+            f"    fsm_state = FSM_CLOSED;\n"
+            f"    session_active = false;\n"
+            f"done:\n"
+            f"    skip;\n"
+            f"}}"
+        )
+
+    def _server_fsm(self) -> str:
+        connect = next((m for m in self.p.messages if "CONNECT"  in m.name or "HELLO" in m.name), None)
+        acc     = next((m for m in self.p.messages if "ACCEPT"   in m.name), None)
+        ping    = next((m for m in self.p.messages if "PING"     in m.name or "HEARTBEAT" in m.name), None)
+        pong    = next((m for m in self.p.messages if "PONG"     in m.name), None)
+        close   = next((m for m in self.p.messages if "CLOSE"    in m.name or "BYE" in m.name), None)
+
+        conn_sym  = self._sym(connect) if connect else self._sym(self.p.messages[0])
+        acc_sym   = self._sym(acc)     if acc     else self._sym(self.p.messages[1] if len(self.p.messages) > 1 else self.p.messages[0])
+        ping_sym  = self._sym(ping)    if ping    else conn_sym
+        pong_sym  = self._sym(pong)    if pong    else acc_sym
+        close_sym = self._sym(close)   if close   else self._sym(self.p.messages[-1])
+
+        return (
+            f"active proctype FSMServer() {{\n"
+            f"    mtype req;\n"
+            f"    int i;\n"
+            f"    /* Wait for CONNECT */\n"
+            f"    c2s ? req;\n"
+            f"    assert(req == {conn_sym});\n"
+            f"    s2c ! {acc_sym};\n"
+            f"    /* Serve data exchange */\n"
+            f"    i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        if\n"
+            f"        :: nempty(c2s) ->\n"
+            f"            c2s ? req;\n"
+            f"            if\n"
+            f"            :: req == {ping_sym} -> s2c ! {pong_sym};\n"
+            f"            :: req == {close_sym} -> break;\n"
+            f"            :: else -> skip;\n"
+            f"            fi;\n"
+            f"        :: i >= MAX_ITER -> break;\n"
+            f"        fi;\n"
+            f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _monitor(self) -> str:
+        """Monitor proctype — checks cross-cutting invariants via assert."""
+        p = self.p
+        return (
+            f"active proctype Monitor() {{\n"
+            f"    int i = 0;\n"
+            f"    do\n"
+            f"    :: i < MAX_ITER ->\n"
+            f"        /* Opcode range invariant */\n"
+            f"        assert(last_opcode == 0 ||\n"
+            f"               (last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX));\n"
+            f"        /* Channel buffer invariant */\n"
+            f"        assert(len(c2s)  <= CHAN_BUF);\n"
+            f"        assert(len(s2c)  <= CHAN_BUF);\n"
+            f"        assert(len(bidi) <= CHAN_BUF);\n"
+            + (f"        /* reqrsp: responses never exceed requests */\n"
+               f"        assert(responses_recv <= requests_sent);\n"
+               if p.pattern == "reqrsp" else "")
+            + (f"        /* pubsub: no publishes before subscription */\n"
+               f"        assert(publishes_recv == 0 || subscribed);\n"
+               if p.pattern == "pubsub" else "")
+            + (f"        /* rpc: returns never exceed calls */\n"
+               f"        assert(returns_recv <= calls_sent);\n"
+               if p.pattern == "rpc" else "")
+            + (f"        /* fsm: valid state range */\n"
+               f"        assert(fsm_state >= FSM_IDLE && fsm_state <= FSM_ERROR);\n"
+               if p.pattern == "fsm" else "")
+            + f"        i++;\n"
+            f"    :: i >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
+    def _ltl_props(self) -> str:
+        p = self.p
+        common = [
+            "/* === LTL temporal properties === */",
+            "/* Safety: opcode always in valid range (or zero = uninitialised) */",
+            "ltl prop_opcode_valid {",
+            "    [] (last_opcode == 0 ||",
+            f"        (last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX))",
+            "}",
+            "",
+            "/* Safety: channels never exceed declared depth */",
+            "ltl prop_no_chan_overflow {",
+            f"    [] (len(c2s) <= CHAN_BUF && len(s2c) <= CHAN_BUF && len(bidi) <= CHAN_BUF)",
+            "}",
+        ]
+
+        pattern_props: list[str] = []
+        if p.pattern == "reqrsp":
+            pattern_props = [
+                "",
+                "/* Liveness: a pending request is always eventually resolved */",
+                "ltl prop_request_resolved {",
+                "    [] (request_pending -> <> (!request_pending))",
+                "}",
+                "",
+                "/* Safety: server never sends more responses than client sent requests */",
+                "ltl prop_response_bound {",
+                "    [] (responses_recv <= requests_sent)",
+                "}",
+            ]
+        elif p.pattern == "pubsub":
+            pattern_props = [
+                "",
+                "/* Safety: no published message received before subscribing */",
+                "ltl prop_subscribe_before_recv {",
+                "    [] (publishes_recv > 0 -> subscribed)",
+                "}",
+                "",
+                "/* Liveness: subscriber eventually receives at least one publish */",
+                "ltl prop_eventual_delivery {",
+                "    <> (publishes_recv > 0)",
+                "}",
+            ]
+        elif p.pattern == "rpc":
+            pattern_props = [
+                "",
+                "/* Liveness: a pending RPC call always eventually returns */",
+                "ltl prop_call_returns {",
+                "    [] (call_pending -> <> (!call_pending))",
+                "}",
+                "",
+                "/* Safety: returns never exceed calls */",
+                "ltl prop_return_bound {",
+                "    [] (returns_recv <= calls_sent)",
+                "}",
+            ]
+        elif p.pattern == "stream":
+            pattern_props = [
+                "",
+                "/* Liveness: stream channel is not permanently full */",
+                "ltl prop_stream_progress {",
+                f"    [] <> (len(c2s) < CHAN_BUF)",
+                "}",
+                "",
+                "/* Liveness: server eventually receives all frames */",
+                "ltl prop_frames_received {",
+                "    <> (frames_recv > 0)",
+                "}",
+            ]
+        elif p.pattern == "fsm":
+            pattern_props = [
+                "",
+                "/* Safety: FSM never enters an out-of-range state */",
+                "ltl prop_fsm_valid_state {",
+                "    [] (fsm_state >= FSM_IDLE && fsm_state <= FSM_ERROR)",
+                "}",
+                "",
+                "/* Safety: once error is detected, it stays detected */",
+                "ltl prop_error_sticky {",
+                "    [] (error_detected -> [] error_detected)",
+                "}",
+                "",
+                "/* Liveness: if no error, FSM eventually completes (reaches CLOSED) */",
+                "ltl prop_fsm_terminates {",
+                "    (!error_detected) -> <> (fsm_state == FSM_CLOSED)",
+                "}",
+            ]
+
+        return "\n".join(common + pattern_props)
+
+    def _proctypes(self) -> str:
+        p = self.p
+        dispatch = {
+            "reqrsp": (self._client_reqrsp, self._server_reqrsp),
+            "stream": (self._client_stream, self._server_stream),
+            "pubsub": (self._client_pubsub, self._server_pubsub),
+            "rpc":    (self._client_rpc,    self._server_rpc),
+            "fsm":    (self._client_fsm,    self._server_fsm),
+        }
+        client_fn, server_fn = dispatch[p.pattern]
+        return "\n\n".join([
+            "/* === Process definitions === */",
+            client_fn(),
+            server_fn(),
+            self._monitor(),
+        ])
+
+    def emit(self) -> str:
+        sections = [
+            self._banner(),
+            self._defines(),
+            "",
+            self._mtype(),
+            "",
+            self._channels(),
+            "",
+            self._shared_vars(),
+            "",
+            self._proctypes(),
+            "",
+            self._ltl_props(),
+            "",
+            "/* end of model */",
+        ]
+        return "\n".join(sections) + "\n"
+
+
+
+
+# ===========================================================================
+# SPIN verifier runner
+# ===========================================================================
+
+import subprocess
+import shutil
+import tempfile
+
+class SpinVerifier:
+    """
+    Run SPIN formal verification on a Promela model.
+
+    Workflow
+    --------
+    1. spin -a <model>.pml          → generate pan.c
+    2. gcc -DSAFETY -O2 -o pan pan.c → compile safety verifier
+    3. ./pan -m500000               → safety check (assertions, deadlock)
+    4. gcc         -O2 -o pan pan.c  → recompile without DSAFETY
+    5. ./pan -a -m500000            → acceptance-cycle check (liveness)
+    """
+
+    MEMLIMIT  = "500000"   # max states
+    SPIN_BIN  = shutil.which("spin") or "spin"
+    GCC_BIN   = shutil.which("gcc")  or "gcc"
+
+    def __init__(self, pml_path: Path, verbose: bool = False) -> None:
+        self.pml     = pml_path
+        self.verbose = verbose
+        self._work   = pml_path.parent / "_spin_work"
+
+    def _run(self, cmd: list[str], **kw) -> subprocess.CompletedProcess:
+        if self.verbose:
+            print(f"  $ {' '.join(cmd)}")
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+    def _print_section(self, title: str, text: str) -> None:
+        print(f"\n  {'─'*60}")
+        print(f"  {title}")
+        print(f"  {'─'*60}")
+        for line in text.strip().splitlines():
+            print(f"    {line}")
+
+    def _parse_pan(self, output: str) -> dict:
+        result = {
+            "errors":          0,
+            "states":          0,
+            "transitions":     0,
+            "depth":           0,
+            "assertion_violated": False,
+            "deadlock":        False,
+            "acceptance_cycle": False,
+            "raw":             output,
+        }
+        for line in output.splitlines():
+            l = line.strip()
+            if "errors:" in l:
+                try:   result["errors"] = int(l.split("errors:")[1].split(",")[0].split()[0])
+                except: pass
+            # "   11948 states, stored"  OR  "11948 states,stored"
+            if "states," in l and "stored" in l:
+                try:   result["states"] = int(l.split()[0].replace(",",""))
+                except: pass
+            if "transitions" in l:
+                try:   result["transitions"] = int(l.split()[0].replace(",",""))
+                except: pass
+            # "depth reached 495"  or  "max depth limit reached"
+            if "depth reached" in l.lower():
+                try:   result["depth"] = int(l.split("depth reached")[-1].strip().split()[0].rstrip(","))
+                except: pass
+            if "assertion violated" in l.lower():
+                result["assertion_violated"] = True
+            # Only flag deadlock/invalid-end-state on actual error lines (not config lines)
+            if ("pan:" in l and "invalid end state" in l.lower()) or \
+               ("pan:" in l and "deadlock" in l.lower()):
+
+                result["deadlock"] = True
+            if "acceptance cycle" in l.lower():
+                result["acceptance_cycle"] = True
+        return result
+
+    def verify(self) -> dict:
+        self._work.mkdir(parents=True, exist_ok=True)
+        results: dict = {
+            "pml":      str(self.pml),
+            "safety":   {},
+            "liveness": {},
+            "passed":   False,
+            "summary":  "",
+        }
+
+        # ── Step 1: generate pan.c ──────────────────────────────────────
+        # SPIN always writes pan.c relative to its cwd, so run inside _work.
+        import shutil as _sh
+        pml_local = self._work / self.pml.name
+        _sh.copy(str(self.pml), str(pml_local))   # stage pml into work dir
+
+        print(f"\n[spin]  Generating verifier from {self.pml.name} ...")
+        r = self._run(
+            [self.SPIN_BIN, "-a", self.pml.name],  # relative; cwd = _work
+            cwd=str(self._work),
+        )
+        if self.verbose and (r.stdout or r.stderr):
+            self._print_section("spin -a output", r.stdout + r.stderr)
+
+        pan_c   = self._work / "pan.c"
+        pan_bin = self._work / "pan"
+
+        if not pan_c.exists():
+            results["summary"] = "FAIL: spin -a did not generate pan.c"
+            print(f"[spin]  ERROR: {results['summary']}")
+            print(r.stdout); print(r.stderr)
+            return results
+
+        # ── Step 2: safety verification ─────────────────────────────────
+        print("[spin]  Compiling safety verifier (DSAFETY) ...")
+        r = self._run(
+            [self.GCC_BIN, "-DSAFETY", "-O2",
+             "-o", str(pan_bin.resolve()), str(pan_c.resolve())],
+        )
+        if r.returncode != 0:
+            results["summary"] = "FAIL: gcc compilation error"
+            self._print_section("gcc stderr", r.stderr)
+            return results
+
+        print(f"[spin]  Running safety check (max states={self.MEMLIMIT}) ...")
+        r = self._run([str(pan_bin.resolve()), f"-m{self.MEMLIMIT}"],
+                      cwd=str(self._work))
+        safety = self._parse_pan(r.stdout + r.stderr)
+        results["safety"] = safety
+        if self.verbose:
+            self._print_section("pan safety output", r.stdout + r.stderr)
+
+        s_ok = (safety["errors"] == 0 and
+                not safety["assertion_violated"] and
+                not safety["deadlock"])
+        print(f"[spin]  Safety  : {'✓ PASS' if s_ok else '✗ FAIL'}"
+              f"  (errors={safety['errors']}, states={safety['states']}, "
+              f"depth={safety['depth']})")
+
+        # ── Step 3: liveness verification ───────────────────────────────
+        print("[spin]  Compiling liveness verifier ...")
+        r = self._run(
+            [self.GCC_BIN, "-O2",
+             "-o", str(pan_bin.resolve()), str(pan_c.resolve())],
+        )
+        if r.returncode != 0:
+            results["summary"] = "FAIL: gcc (liveness) compilation error"
+            self._print_section("gcc stderr", r.stderr)
+            return results
+
+        print(f"[spin]  Running liveness check (-a, max states={self.MEMLIMIT}) ...")
+        r = self._run([str(pan_bin.resolve()), "-a", f"-m{self.MEMLIMIT}"],
+                      cwd=str(self._work))
+        liveness = self._parse_pan(r.stdout + r.stderr)
+        results["liveness"] = liveness
+        if self.verbose:
+            self._print_section("pan liveness output", r.stdout + r.stderr)
+
+        l_ok = (liveness["errors"] == 0 and
+                not liveness["acceptance_cycle"])
+        print(f"[spin]  Liveness: {'✓ PASS' if l_ok else '✗ FAIL'}"
+              f"  (errors={liveness['errors']}, states={liveness['states']}, "
+              f"depth={liveness['depth']})")
+
+        overall = s_ok and l_ok
+        results["passed"]  = overall
+        results["summary"] = "PASS — no errors found" if overall else "FAIL — see details above"
+        return results
+
+
+    def cleanup(self) -> None:
+        import shutil as _sh
+        if self._work.exists():
+            _sh.rmtree(str(self._work))
 
 
 if __name__ == "__main__":
