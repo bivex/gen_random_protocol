@@ -56,9 +56,9 @@ class SpinVerifier(ModelVerifier):
             if m_tr:
                 transitions = int(m_tr.group(1))
 
-            assertion_violated = "assertion violated" in text.lower()
-            deadlock = "invalid end state" in text.lower()
-            acceptance_cycle = "acceptance cycle" in text.lower()
+            assertion_violated = errors > 0 and "assertion violated" in text.lower()
+            deadlock = errors > 0 and "invalid end state" in text.lower()
+            acceptance_cycle = errors > 0 and "acceptance cycle" in text.lower()
             depth_limit_hit = "depth limit reached" in text.lower()
 
             return {
