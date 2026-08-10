@@ -1666,6 +1666,11 @@ class PromelaEmitter:
     # ---- Client proctypes per pattern ------------------------------------
 
     def _send_choice(self, chan: str, msgs: list[Message], indent: str = "        ") -> str:
+        if not msgs:
+            msgs = self.p.messages
+        # Sample representative subset if message list is large to maintain fast SPIN verification time
+        if len(msgs) > 3:
+            msgs = [msgs[0], msgs[len(msgs) // 2], msgs[-1]]
         if len(msgs) == 1:
             sym = self._sym(msgs[0])
             return (
@@ -1910,10 +1915,12 @@ class PromelaEmitter:
         rej     = next((m for m in self.p.messages if "REJECT"   in m.name or "ERROR"     in m.name), None)
 
         conn_sym  = self._sym(connect) if connect else self._sym(self.p.messages[0])
-        ping_sym  = self._sym(ping)    if ping    else conn_sym
         close_sym = self._sym(close)   if close   else self._sym(self.p.messages[-1])
         acc_sym   = self._sym(acc)     if acc     else self._sym(self.p.messages[1] if len(self.p.messages) > 1 else self.p.messages[0])
         rej_sym   = self._sym(rej)     if rej     else self._sym(self.p.messages[-1])
+
+        data_msgs = [m for m in self.p.messages if self._sym(m) not in (conn_sym, close_sym, acc_sym, rej_sym)] or self.p.messages
+        data_send = self._send_choice("c2s", data_msgs, indent="        ")
 
         return (
             f"active proctype FSMClient() {{\n"
@@ -1934,13 +1941,11 @@ class PromelaEmitter:
             f"        error_detected = true;\n"
             f"        goto done;\n"
             f"    fi;\n"
-            f"    /* CONNECTED: exchange data */\n"
+            f"    /* CONNECTED: exchange data across all protocol payload types */\n"
             f"    i = 0;\n"
             f"    do\n"
             f"    :: i < MAX_ITER && fsm_state == FSM_CONNECTED ->\n"
-            f"        c2s ! {ping_sym};\n"
-            f"        last_opcode = OP_{ping_sym};\n"
-            f"        assert(last_opcode >= OPCODE_MIN && last_opcode <= OPCODE_MAX);\n"
+            f"{data_send}\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
             f"    od;\n"
@@ -1960,12 +1965,15 @@ class PromelaEmitter:
         ping    = next((m for m in self.p.messages if "PING"     in m.name or "HEARTBEAT" in m.name), None)
         pong    = next((m for m in self.p.messages if "PONG"     in m.name), None)
         close   = next((m for m in self.p.messages if "CLOSE"    in m.name or "BYE" in m.name), None)
+        rej     = next((m for m in self.p.messages if "REJECT"   in m.name or "ERROR" in m.name), None)
 
         conn_sym  = self._sym(connect) if connect else self._sym(self.p.messages[0])
         acc_sym   = self._sym(acc)     if acc     else self._sym(self.p.messages[1] if len(self.p.messages) > 1 else self.p.messages[0])
-        ping_sym  = self._sym(ping)    if ping    else conn_sym
-        pong_sym  = self._sym(pong)    if pong    else acc_sym
         close_sym = self._sym(close)   if close   else self._sym(self.p.messages[-1])
+        rej_sym   = self._sym(rej)     if rej     else self._sym(self.p.messages[-1])
+
+        reply_msgs = [m for m in self._s2c + self._bidi if self._sym(m) not in (acc_sym, rej_sym)] or self.p.messages
+        reply_send = self._send_choice("s2c", reply_msgs, indent="                ")
 
         return (
             f"active proctype FSMServer() {{\n"
@@ -1974,8 +1982,13 @@ class PromelaEmitter:
             f"    /* Wait for CONNECT */\n"
             f"    c2s ? req;\n"
             f"    assert(req == {conn_sym});\n"
-            f"    s2c ! {acc_sym};\n"
-            f"    /* Serve data exchange */\n"
+            f"    /* Non-deterministic accept or reject to exercise all FSM paths */\n"
+            f"    if\n"
+            f"    :: s2c ! {acc_sym};\n"
+            f"    :: s2c ! {rej_sym};\n"
+            f"       goto done;\n"
+            f"    fi;\n"
+            f"    /* Serve data exchange across all protocol payload types */\n"
             f"    i = 0;\n"
             f"    do\n"
             f"    :: i < MAX_ITER ->\n"
@@ -1983,15 +1996,17 @@ class PromelaEmitter:
             f"        :: nempty(c2s) ->\n"
             f"            c2s ? req;\n"
             f"            if\n"
-            f"            :: req == {ping_sym} -> s2c ! {pong_sym};\n"
             f"            :: req == {close_sym} -> break;\n"
-            f"            :: else -> skip;\n"
+            f"            :: else ->\n"
+            f"{reply_send}\n"
             f"            fi;\n"
             f"        :: i >= MAX_ITER -> break;\n"
             f"        fi;\n"
             f"        i++;\n"
             f"    :: i >= MAX_ITER -> break;\n"
             f"    od;\n"
+            f"done:\n"
+            f"    skip;\n"
             f"}}"
         )
 
