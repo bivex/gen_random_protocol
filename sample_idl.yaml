@@ -1,0 +1,28 @@
+protocol:
+  name: MY_PROTO
+  version: 1.2.0
+  endian: little
+  pattern: rpc
+  description: "Handwritten binary protocol specification"
+
+enums:
+  - name: MY_PROTO_STATUS_t
+    members:
+      - { name: MY_PROTO_STATUS_OK, value: 0 }
+      - { name: MY_PROTO_STATUS_ERR, value: 1 }
+
+messages:
+  - name: CONNECT
+    opcode: 1
+    direction: C->S
+    description: "Establish client connection"
+    fields:
+      - { name: client_id, type: u32, comment: "Client unique integer ID" }
+      - { name: flags, type: u8, bits: 4, comment: "Client operational flags" }
+
+  - name: DISCONNECT
+    opcode: 2
+    direction: C->S
+    description: "Gracefully disconnect client"
+    fields:
+      - { name: reason, type: u8, comment: "Reason code for disconnection" }

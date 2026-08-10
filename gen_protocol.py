@@ -45,6 +45,13 @@ from pathlib import Path
 from random import Random
 from typing import Any
 
+try:
+    import yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
+
 # ---------------------------------------------------------------------------
 # C identifier safety
 # ---------------------------------------------------------------------------
@@ -989,6 +996,330 @@ def protocol_to_dict(proto: Protocol) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# IDL / YAML / JSON Protocol Specification & Documentation Emitter
+# ---------------------------------------------------------------------------
+
+IDL_TO_C_TYPE = {
+    "u8":   "uint8_t",
+    "u16":  "uint16_t",
+    "u32":  "uint32_t",
+    "u64":  "uint64_t",
+    "i8":   "int8_t",
+    "i16":  "int16_t",
+    "i32":  "int32_t",
+    "i64":  "int64_t",
+    "f32":  "float",
+    "f64":  "double",
+    "bool": "uint8_t",
+}
+
+C_TYPE_TO_IDL = {
+    "uint8_t":  "u8",
+    "uint16_t": "u16",
+    "uint32_t": "u32",
+    "uint64_t": "u64",
+    "int8_t":   "i8",
+    "int16_t":  "i16",
+    "int32_t":  "i32",
+    "int64_t":  "i64",
+    "float":    "f32",
+    "double":   "f64",
+}
+
+
+def protocol_to_yaml_dict(proto: Protocol) -> dict:
+    return {
+        "protocol": {
+            "name":        proto.name,
+            "version":     f"{proto.version_major}.{proto.version_minor}.{proto.version_patch}",
+            "magic":       f"0x{proto.magic:08X}",
+            "pattern":     proto.pattern,
+            "endian":      proto.endian,
+            "seed":        proto.seed,
+            "description": proto.description,
+        },
+        "enums": [
+            {
+                "name":    e.name,
+                "members": [{"name": m, "value": v} for m, v in e.members],
+            }
+            for e in proto.enums
+        ],
+        "messages": [
+            {
+                "name":        m.name,
+                "opcode":      f"0x{m.opcode:02X}",
+                "direction":   m.direction,
+                "description": m.description,
+                "wire_size":   _msg_wire_size(m),
+                "fields": [
+                    {
+                        "name":      f.name,
+                        "type":      C_TYPE_TO_IDL.get(f.ctype, f.ctype),
+                        "wire_size": _field_wire_size(f),
+                        **({"bits": f.bits} if f.bits is not None else {}),
+                        **({"array_size": f.array_size} if f.array_size is not None else {}),
+                        "comment":   f.comment,
+                    }
+                    for f in m.fields
+                ],
+            }
+            for m in proto.messages
+        ],
+    }
+
+
+def protocol_to_yaml(proto: Protocol) -> str:
+    yd = protocol_to_yaml_dict(proto)
+    if _YAML_AVAILABLE:
+        return yaml.dump(yd, sort_keys=False)
+    return json.dumps(yd, indent=2)
+
+
+def protocol_from_dict(data: dict) -> Protocol:
+    pd = data.get("protocol", data)
+    raw_name = str(pd.get("name", "MY_PROTO"))
+    name = _sanitize_proto_name(raw_name)
+
+    seed = str(pd.get("seed") or _make_seed())
+    pattern = str(pd.get("pattern", "reqrsp")).lower()
+    if pattern not in PATTERNS:
+        pattern = "reqrsp"
+    endian = str(pd.get("endian", "little")).lower()
+    if endian not in ("little", "big"):
+        endian = "little"
+    description = str(pd.get("description", f"Protocol {name} specification"))
+
+    ver_raw = pd.get("version", "1.0.0")
+    if isinstance(ver_raw, str):
+        parts = ver_raw.split(".")
+        v_maj = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 1
+        v_min = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        v_pat = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    elif isinstance(ver_raw, (int, float)):
+        v_maj, v_min, v_pat = int(ver_raw), 0, 0
+    elif isinstance(ver_raw, dict):
+        v_maj = int(ver_raw.get("major", 1))
+        v_min = int(ver_raw.get("minor", 0))
+        v_pat = int(ver_raw.get("patch", 0))
+    else:
+        v_maj, v_min, v_pat = 1, 0, 0
+
+    magic_raw = pd.get("magic")
+    if isinstance(magic_raw, str):
+        magic = int(magic_raw, 16) if (magic_raw.startswith("0x") or magic_raw.startswith("0X")) else int(magic_raw)
+    elif isinstance(magic_raw, int):
+        magic = magic_raw
+    else:
+        h = hashlib.sha256(f"{name}:{seed}".encode()).digest()
+        val = struct.unpack(">I", h[:4])[0]
+        for i in range(4):
+            if (val >> (i * 8)) & 0xFF == 0:
+                val ^= (0xAB << (i * 8))
+        magic = val & 0xFFFFFFFF
+
+    # Enums
+    enums: list[Enum] = []
+    for ed in data.get("enums", []):
+        ename = str(ed.get("name", f"{name}_ENUM_t"))
+        members = []
+        for m in ed.get("members", []):
+            if isinstance(m, dict):
+                members.append((str(m.get("name", "")), int(m.get("value", 0))))
+            elif isinstance(m, (list, tuple)) and len(m) == 2:
+                members.append((str(m[0]), int(m[1])))
+        enums.append(Enum(name=ename, members=members))
+
+    # Messages
+    messages: list[Message] = []
+    used_ops: set = set()
+    used_names: set = set()
+
+    for md in data.get("messages", []):
+        mname = str(md.get("name", "MSG"))
+        if not mname.startswith(name) and not mname.startswith("MSG_"):
+            mname = f"{name}_MSG_{mname}"
+        elif mname.startswith("MSG_"):
+            mname = f"{name}_{mname}"
+        mname = _sanitize_proto_name(mname)
+
+        orig_name = mname
+        idx = 1
+        while mname in used_names:
+            mname = f"{orig_name}_{idx}"
+            idx += 1
+        used_names.add(mname)
+
+        op_raw = md.get("opcode", len(messages) + 1)
+        if isinstance(op_raw, str):
+            opcode = int(op_raw, 16) if (op_raw.startswith("0x") or op_raw.startswith("0X")) else int(op_raw)
+        elif isinstance(op_raw, int):
+            opcode = op_raw
+        else:
+            opcode = len(messages) + 1
+        
+        direction = str(md.get("direction", "BIDI")).upper()
+        if direction not in ("C->S", "S->C", "BIDI"):
+            direction = "BIDI"
+        mdesc = str(md.get("description", f"Message {mname}"))
+
+        fields: list[Field] = []
+        for fd in md.get("fields", []):
+            fname = str(fd.get("name", "field"))
+            raw_type = str(fd.get("type") or fd.get("ctype") or "u8").strip()
+            ctype = IDL_TO_C_TYPE.get(raw_type, raw_type)
+            bits = fd.get("bits")
+            if bits is not None:
+                bits = int(bits)
+            array_size = fd.get("array_size") or fd.get("array")
+            if array_size is not None:
+                array_size = int(array_size)
+            fcomment = str(fd.get("comment") or f"{fname} field")
+            fields.append(Field(name=fname, ctype=ctype, bits=bits, array_size=array_size, comment=fcomment))
+
+        messages.append(Message(name=mname, opcode=opcode, fields=fields, direction=direction, description=mdesc))
+
+    max_payload = max((_msg_wire_size(m) for m in messages), default=0)
+
+    return Protocol(
+        name=name,
+        version_major=v_maj,
+        version_minor=v_min,
+        version_patch=v_pat,
+        magic=magic,
+        pattern=pattern,
+        seed=seed,
+        messages=messages,
+        enums=enums,
+        header_struct_name=f"{name.lower()}_hdr_t",
+        max_payload_size=max_payload,
+        endian=endian,
+        description=description,
+    )
+
+
+def load_protocol_from_file(path: Path) -> Protocol:
+    if not path.exists():
+        raise FileNotFoundError(f"Spec file not found: {path}")
+    raw_text = path.read_text()
+    if path.suffix.lower() in ('.yaml', '.yml'):
+        if not _YAML_AVAILABLE:
+            raise RuntimeError("PyYAML is required to parse YAML specs. Install with 'pip install pyyaml'.")
+        data = yaml.safe_load(raw_text)
+    else:
+        data = json.loads(raw_text)
+    return protocol_from_dict(data)
+
+
+class MarkdownDocEmitter:
+    def __init__(self, proto: Protocol) -> None:
+        self.p = proto
+
+    def emit(self) -> str:
+        p = self.p
+        lines = []
+        lines.append(f"# Binary Protocol Specification: {p.name}")
+        lines.append("")
+        lines.append(f"**Version**: `{p.version_major}.{p.version_minor}.{p.version_patch}`  ")
+        lines.append(f"**Magic Constant**: `0x{p.magic:08X}`  ")
+        lines.append(f"**Endianness**: `{p.endian}-endian`  ")
+        lines.append(f"**Pattern**: `{p.pattern.upper()}`  ")
+        lines.append(f"**Seed**: `{p.seed}`  ")
+        lines.append("")
+        lines.append(f"{p.description}")
+        lines.append("")
+
+        lines.append("## 1. Frame Header Layout")
+        lines.append("")
+        lines.append("All frames transmitted over the wire begin with the fixed-size common header (22 octets total):")
+        lines.append("")
+        lines.append("```text")
+        lines.append(" 0                   1                   2                   3")
+        lines.append(" 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|                            magic                              |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|            version            |            opcode             |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|                          session_id                           |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|                           sequence                            |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|          payload_len          |             crc32             |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("|                            crc32 (cont)                       |")
+        lines.append("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+        lines.append("```")
+        lines.append("")
+        lines.append("| Offset (Bytes) | Field Name | Type | Wire Size | Description |")
+        lines.append("|---|---|---|---|---|")
+        lines.append(f"| `0 .. 3` | `magic` | `uint32_t` | 4 octets | Protocol identification constant (`0x{p.magic:08X}`) |")
+        lines.append("| `4 .. 5` | `version` | `uint16_t` | 2 octets | Protocol version number |")
+        lines.append("| `6 .. 7` | `opcode` | `uint16_t` | 2 octets | Message type identifier |")
+        lines.append("| `8 .. 11` | `session_id` | `uint32_t` | 4 octets | Connection or session identifier |")
+        lines.append("| `12 .. 15` | `sequence` | `uint32_t` | 4 octets | Frame sequence counter |")
+        lines.append("| `16 .. 17` | `payload_len` | `uint16_t` | 2 octets | Payload byte length |")
+        lines.append("| `18 .. 21` | `crc32` | `uint32_t` | 4 octets | Frame CRC-32 (ISO-HDLC) over header (crc=0) + payload |")
+        lines.append("")
+
+        lines.append("## 2. Opcode Directory")
+        lines.append("")
+        lines.append("| Opcode | Message Name | Direction | Payload Size | Description |")
+        lines.append("|---|---|---|---|---|")
+        for m in p.messages:
+            lines.append(f"| `0x{m.opcode:02X}` | `{m.name}` | `{m.direction}` | {_msg_wire_size(m)} bytes | {m.description} |")
+        lines.append("")
+
+        if p.enums:
+            lines.append("## 3. Enumerations")
+            lines.append("")
+            for e in p.enums:
+                lines.append(f"### `{e.name}`")
+                lines.append("")
+                lines.append("| Constant | Value |")
+                lines.append("|---|---|")
+                for m_name, val in e.members:
+                    lines.append(f"| `{m_name}` | `{val}` |")
+                lines.append("")
+
+        sec_idx = 4 if p.enums else 3
+        lines.append(f"## {sec_idx}. Message Payload Specifications")
+        lines.append("")
+        for m in p.messages:
+            lines.append(f"### `0x{m.opcode:02X}`: {m.name}")
+            lines.append("")
+            lines.append(f"- **Direction**: `{m.direction}`")
+            lines.append(f"- **Payload Wire Size**: `{_msg_wire_size(m)} bytes`")
+            lines.append(f"- **Description**: {m.description}")
+            lines.append("")
+            if m.fields:
+                lines.append("| Field Name | Type | Wire Size | Attributes | Description |")
+                lines.append("|---|---|---|---|---|")
+                for f in m.fields:
+                    attrs = []
+                    if f.bits is not None:
+                        attrs.append(f"bitfield ({f.bits} bits)")
+                    if f.array_size is not None:
+                        attrs.append(f"array[{f.array_size}]")
+                    attr_str = ", ".join(attrs) if attrs else "-"
+                    lines.append(f"| `{f.name}` | `{f.ctype}` | {_field_wire_size(f)} B | {attr_str} | {f.comment} |")
+                lines.append("")
+            else:
+                lines.append("*Empty payload (0 bytes).*")
+                lines.append("")
+
+        sec_idx += 1
+        lines.append(f"## {sec_idx}. Encoding & Validation Rules")
+        lines.append("")
+        lines.append("1. **Byte Order**: Multi-byte numeric fields are encoded on the wire in **" + p.endian + "-endian** byte order.")
+        lines.append("2. **CRC Calculation**: Compute CRC-32 (ISO-HDLC polynomial `0xEDB88320`) over the 22-byte header with `crc32 = 0`, followed immediately by the wire-encoded payload bytes.")
+        lines.append("3. **Opcode Validation**: Any frame with an unknown `opcode` must be rejected with error code `-6` (`HDR_ERR_OPCODE`).")
+        lines.append("4. **Payload Bounds**: `payload_len` must strictly match the declared message structure size.")
+        lines.append("")
+
+        return "\n".join(lines) + "\n"
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1008,6 +1339,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-impl",        action="store_true", help="Skip .c stub")
     ap.add_argument("--seed",           default=None, help="Hex seed to reproduce a run")
     ap.add_argument("--list-seeds",     action="store_true", help="List past seeds and exit")
+    ap.add_argument("--spec",           default=None, help="Load protocol IDL spec from YAML/JSON file instead of random generation")
+    ap.add_argument("--export-spec",    action="store_true", help="Export protocol.yaml IDL specification file")
+    ap.add_argument("--doc",            action="store_true", help="Generate human-readable PROTOCOL_SPEC.md documentation")
     ap.add_argument("--json",           action="store_true", help="Also write JSON manifest")
     ap.add_argument("--spin",           action="store_true",
                     help="Generate Promela model and run SPIN formal verification")
@@ -1037,18 +1371,24 @@ def main() -> int:
 
 
 
-    seed = args.seed if args.seed else _make_seed()
-    rng  = Random(seed)
+    if args.spec:
+        spec_path = Path(args.spec)
+        print(f"[gen_protocol]  loading protocol specification from {spec_path} ...")
+        proto = load_protocol_from_file(spec_path)
+        seed = proto.seed
+    else:
+        seed = args.seed if args.seed else _make_seed()
+        rng  = Random(seed)
 
-    print(f"[gen_protocol]  seed = {seed}")
+        print(f"[gen_protocol]  seed = {seed}")
 
-    gen   = ProtocolGenerator(rng, seed)
-    proto = gen.generate(
-        name_hint  = args.name,
-        n_messages = args.messages,
-        max_fields = args.fields,
-        pattern    = args.pattern,
-    )
+        gen   = ProtocolGenerator(rng, seed)
+        proto = gen.generate(
+            name_hint  = args.name,
+            n_messages = args.messages,
+            max_fields = args.fields,
+            pattern    = args.pattern,
+        )
 
     _log_seed(seed, proto.name)
 
@@ -1058,10 +1398,14 @@ def main() -> int:
     h_name = f"{proto.name.lower()}.h"
     c_name = f"{proto.name.lower()}.c"
     j_name = f"{proto.name.lower()}_manifest.json"
+    y_name = "protocol.yaml" if _YAML_AVAILABLE else "protocol.json"
+    doc_name = "PROTOCOL_SPEC.md"
 
     h_path = outdir / h_name
     c_path = outdir / c_name
     j_path = outdir / j_name
+    y_path = outdir / y_name
+    doc_path = outdir / doc_name
 
     # Header
     h_code = CHeaderEmitter(proto).emit()
@@ -1082,6 +1426,19 @@ def main() -> int:
     if args.json:
         j_path.write_text(json.dumps(protocol_to_dict(proto), indent=2))
         print(f"[gen_protocol]  wrote {j_path}")
+
+    # Export protocol.yaml IDL spec
+    if args.export_spec or args.spec:
+        y_path.write_text(protocol_to_yaml(proto))
+        print(f"[gen_protocol]  wrote {y_path}")
+
+    # Generate Markdown documentation
+    if args.doc or args.spec:
+        doc_code = MarkdownDocEmitter(proto).emit()
+        doc_path.write_text(doc_code)
+        print(f"[gen_protocol]  wrote {doc_path}")
+        if args.verbose:
+            print("\n" + "=" * 78 + "\n" + doc_code)
 
     # Promela model + SPIN verification
     spin_ok = True

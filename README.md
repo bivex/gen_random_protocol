@@ -15,7 +15,9 @@ Generates **independently randomized, collision-resistant C protocols** with cry
 | Boolean Type | Explicit 1-octet wire format (`uint8_t`: 0 = false, 1 = true) |
 | Frame CRC | CRC-32/ISO-HDLC computed over **exact wire-encoded bytes** (`wire_hdr(crc=0) || wire_payload`) |
 | Opcode Validation | Checked against generated opcode table in `hdr_validate()` (returns `-6` on unknown) |
+| Specification IDL | YAML / JSON IDL format (`protocol.yaml`) for declarative protocol schema & compilation |
 | Formal Model | Promela SPIN model (`.pml`) performing **Bounded Model Checking (BMC)** up to `MAX_ITER = 16` |
+| Documentation | Human-readable Markdown RFC-style spec (`PROTOCOL_SPEC.md`) with wire diagram and offset tables |
 | Manifest | JSON manifest with exact per-field and per-message payload `wire_size` in bytes |
 | CLI Safety | Strict input validation for `-m 1..254`, `-f 1..64`, and `--seed` (32-character hex) |
 
@@ -24,7 +26,8 @@ Generates **independently randomized, collision-resistant C protocols** with cry
 ```bash
 python3 gen_protocol.py                         # fully random
 python3 gen_protocol.py -n MY_PROTO -m 8 -f 5   # named, 8 msgs, max 5 fields
-python3 gen_protocol.py -p rpc --spin --json     # RPC pattern + SPIN verification + JSON
+python3 gen_protocol.py -p rpc --spin --export-spec --doc # compile + export protocol.yaml & spec doc
+python3 gen_protocol.py --spec protocol.yaml --spin      # compile protocol from YAML IDL specification
 python3 gen_protocol.py --seed 3e8c4ea8...       # reproduce a past run
 python3 gen_protocol.py --list-seeds             # show seed log
 ```
@@ -38,6 +41,9 @@ python3 gen_protocol.py --list-seeds             # show seed log
 | `-m N` | Number of message types | `4–16` (range `1–254`) |
 | `-f N` | Max fields per struct (including injected) | `3–10` (range `1–64`) |
 | `-p PATTERN` | `auto` `reqrsp` `stream` `pubsub` `rpc` `fsm` | `auto` |
+| `--spec FILE` | Compile protocol from YAML/JSON IDL specification file | — |
+| `--export-spec` | Export declarative `protocol.yaml` IDL specification | off |
+| `--doc` | Generate human-readable `PROTOCOL_SPEC.md` documentation | off |
 | `--spin` | Generate Promela model and run SPIN verification | off |
 | `--no-verify` | With `--spin`: generate `.pml` but skip SPIN run | off |
 | `--no-impl` | Skip `.c` stub | off |
