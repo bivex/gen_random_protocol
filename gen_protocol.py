@@ -513,7 +513,7 @@ class CHeaderEmitter:
             f"#define {p.name}_VERSION_MINOR   {p.version_minor}U",
             f"#define {p.name}_VERSION_PATCH   {p.version_patch}U",
             f"#define {p.name}_VERSION         "
-            f"(({p.version_major}U<<16)|({p.version_minor}U<<8)|{p.version_patch}U)",
+            f"((uint16_t)((({p.version_major}U & 0xFFU) << 8) | ({p.version_minor}U & 0xFFU)))",
             f"#define {p.name}_MAX_PAYLOAD     {p.max_payload_size}U",
             f"#define {p.name}_HDR_SIZE        sizeof({p.header_struct_name})",
             "",
@@ -593,7 +593,7 @@ class CHeaderEmitter:
         ]
         for msg in p.messages:
             lines.append(
-                f"#define {msg.name:<54} 0x{msg.opcode:02X}U"
+                f"#define {msg.name:<54} 0x{msg.opcode:04X}U"
             )
 
         return "\n".join(lines)
@@ -639,24 +639,23 @@ class CHeaderEmitter:
     def _common_hdr_struct(self) -> str:
         p = self.p
         return "\n".join([
-            f"/* Common wire header — prepended to every {p.name} frame */",
+            f"/* Common wire header — prepended to every {p.name} frame (22 bytes total) */",
             f"/* Multi-byte fields are in {p.endian}-endian wire order.  "
             f"Call {p.name.lower()}_hdr_encode() before send, _hdr_decode() after recv. */",
             f"typedef struct PROTO_PACKED {{",
-            f"    uint32_t     magic;        /* Must equal {p.name}_MAGIC (wire order) */",
-            f"    uint32_t     version;      /* Encoded {p.version_major}.{p.version_minor}.{p.version_patch} (wire order) */",
-            f"    uint8_t      opcode;       /* One of {p.name}_MSG_* */",
-            f"    uint8_t      flags;        /* Protocol-defined flag bits */",
-            f"    uint16_t     payload_len;  /* Payload byte length (wire order) */",
-            f"    uint32_t     seq;          /* Monotonic sequence number (wire order) */",
-            f"    uint32_t     session_id;   /* Session identifier (wire order) */",
-            f"    uint32_t     crc32;        /* CRC-32/ISO-HDLC of hdr(crc=0)+payload (wire order) */",
+            f"    uint32_t     magic;        /* 0..3:   Must equal {p.name}_MAGIC (wire order) */",
+            f"    uint16_t     version;      /* 4..5:   Encoded major.minor version (wire order) */",
+            f"    uint16_t     opcode;       /* 6..7:   Message type identifier (wire order) */",
+            f"    uint32_t     session_id;   /* 8..11:  Session identifier (wire order) */",
+            f"    uint32_t     sequence;     /* 12..15: Frame sequence counter (wire order) */",
+            f"    uint16_t     payload_len;  /* 16..17: Payload byte length (wire order) */",
+            f"    uint32_t     crc32;        /* 18..21: Frame CRC-32 (ISO-HDLC) of hdr(crc=0)+payload (wire order) */",
             f"}} {p.header_struct_name};",
         ])
 
     def _msg_struct(self, msg: Message) -> str:
         lines = [
-            f"/* {msg.name} payload  (opcode=0x{msg.opcode:02X}, {msg.direction}) */",
+            f"/* {msg.name} payload  (opcode=0x{msg.opcode:04X}, {msg.direction}) */",
             f"/* {msg.description} */",
             f"typedef struct PROTO_PACKED {{",
         ]
@@ -673,19 +672,31 @@ class CHeaderEmitter:
         p = self.p
         n = p.name.lower()
         return "\n".join([
+            "/* === Header Validation Return Codes === */",
+            f"typedef enum {{",
+            f"    {p.name}_HDR_OK                  =  0,  /* Header is valid */",
+            f"    {p.name}_HDR_ERR_MAGIC           = -1,  /* Magic constant mismatch */",
+            f"    {p.name}_HDR_ERR_VERSION         = -2,  /* Version mismatch */",
+            f"    {p.name}_HDR_ERR_PAYLOAD_TOO_BIG = -3,  /* Payload length exceeds MAX_PAYLOAD */",
+            f"    {p.name}_HDR_ERR_LEN_MISMATCH    = -4,  /* Payload length mismatch */",
+            f"    {p.name}_HDR_ERR_CRC             = -5,  /* CRC-32 checksum error */",
+            f"    {p.name}_HDR_ERR_OPCODE          = -6   /* Unknown or unsupported opcode */",
+            f"}} {n}_hdr_err_t;",
+            "",
             "/* === API prototypes === */",
-            f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                   uint32_t session_id, uint32_t seq, uint16_t payload_len);",
+            f"void {n}_hdr_init({p.header_struct_name} *hdr, uint16_t opcode,",
+            f"                   uint32_t session_id, uint32_t sequence, uint16_t payload_len);",
             f"void {n}_hdr_encode({p.header_struct_name} *hdr);",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr);",
             "",
             f"uint32_t {n}_crc32(const void *data, size_t len);",
+            f"/* Note: {n}_frame_crc expects hdr in HOST byte order. It internally converts to wire order for CRC calculation. */",
             f"uint32_t {n}_frame_crc(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len);",
             "",
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len);",
-            f"const char *{n}_opcode_str(uint8_t opcode);",
+            f"const char *{n}_opcode_str(uint16_t opcode);",
             "",
             "/* === Per-message payload serialization prototypes === */",
             "\n".join([
@@ -775,7 +786,7 @@ class CSourceEmitter:
         p = self.p
         n = p.name.lower()
         lines = [
-            f"const char *{n}_opcode_str(uint8_t opcode) {{",
+            f"const char *{n}_opcode_str(uint16_t opcode) {{",
             "    switch (opcode) {",
         ]
         for m in p.messages:
@@ -805,37 +816,38 @@ class CSourceEmitter:
             "    return crc ^ 0xFFFFFFFFU;",
             "}",
             "",
-            f"void {n}_hdr_init({p.header_struct_name} *hdr, uint8_t opcode,",
-            f"                   uint32_t session_id, uint32_t seq, uint16_t payload_len) {{",
+            f"void {n}_hdr_init({p.header_struct_name} *hdr, uint16_t opcode,",
+            f"                   uint32_t session_id, uint32_t sequence, uint16_t payload_len) {{",
             "    if (!hdr) return;",
             "    memset(hdr, 0, sizeof(*hdr));",
             f"    hdr->magic       = {p.name}_MAGIC;",
             f"    hdr->version     = {p.name}_VERSION;",
             "    hdr->opcode      = opcode;",
-            "    hdr->flags       = 0;",
-            "    hdr->payload_len = payload_len;",
-            "    hdr->seq         = seq;",
             "    hdr->session_id  = session_id;",
+            "    hdr->sequence    = sequence;",
+            "    hdr->payload_len = payload_len;",
             "    hdr->crc32       = 0;",
             "}",
             "",
             f"void {n}_hdr_encode({p.header_struct_name} *hdr) {{",
             "    if (!hdr) return;",
             f"    hdr->magic       = {p.name}_TO_WIRE32(hdr->magic);",
-            f"    hdr->version     = {p.name}_TO_WIRE32(hdr->version);",
-            f"    hdr->payload_len = {p.name}_TO_WIRE16(hdr->payload_len);",
-            f"    hdr->seq         = {p.name}_TO_WIRE32(hdr->seq);",
+            f"    hdr->version     = {p.name}_TO_WIRE16(hdr->version);",
+            f"    hdr->opcode      = {p.name}_TO_WIRE16(hdr->opcode);",
             f"    hdr->session_id  = {p.name}_TO_WIRE32(hdr->session_id);",
+            f"    hdr->sequence    = {p.name}_TO_WIRE32(hdr->sequence);",
+            f"    hdr->payload_len = {p.name}_TO_WIRE16(hdr->payload_len);",
             f"    hdr->crc32       = {p.name}_TO_WIRE32(hdr->crc32);",
             "}",
             "",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr) {{",
             "    if (!hdr) return;",
             f"    hdr->magic       = {p.name}_FROM_WIRE32(hdr->magic);",
-            f"    hdr->version     = {p.name}_FROM_WIRE32(hdr->version);",
-            f"    hdr->payload_len = {p.name}_FROM_WIRE16(hdr->payload_len);",
-            f"    hdr->seq         = {p.name}_FROM_WIRE32(hdr->seq);",
+            f"    hdr->version     = {p.name}_FROM_WIRE16(hdr->version);",
+            f"    hdr->opcode      = {p.name}_FROM_WIRE16(hdr->opcode);",
             f"    hdr->session_id  = {p.name}_FROM_WIRE32(hdr->session_id);",
+            f"    hdr->sequence    = {p.name}_FROM_WIRE32(hdr->sequence);",
+            f"    hdr->payload_len = {p.name}_FROM_WIRE16(hdr->payload_len);",
             f"    hdr->crc32       = {p.name}_FROM_WIRE32(hdr->crc32);",
             "}",
             "",
@@ -860,22 +872,22 @@ class CSourceEmitter:
             "",
             f"int {n}_hdr_validate(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len) {{",
-            "    if (!hdr) return -1;",
-            f"    if (hdr->magic != {p.name}_MAGIC) return -1;        /* invalid magic */",
-            f"    if (hdr->version != {p.name}_VERSION) return -2;    /* version mismatch */",
-            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD) return -3; /* length exceeds max */",
-            "    if ((size_t)hdr->payload_len != payload_len) return -4;       /* length mismatch */",
+            f"    if (!hdr) return {p.name}_HDR_ERR_MAGIC;",
+            f"    if (hdr->magic != {p.name}_MAGIC) return {p.name}_HDR_ERR_MAGIC;        /* invalid magic */",
+            f"    if (hdr->version != {p.name}_VERSION) return {p.name}_HDR_ERR_VERSION;    /* version mismatch */",
+            f"    if (hdr->payload_len > {p.name}_MAX_PAYLOAD) return {p.name}_HDR_ERR_PAYLOAD_TOO_BIG; /* length exceeds max */",
+            f"    if ((size_t)hdr->payload_len != payload_len) return {p.name}_HDR_ERR_LEN_MISMATCH;       /* length mismatch */",
             "    uint32_t expected_crc = "
             f"{n}_frame_crc(hdr, payload, payload_len);",
-            "    if (hdr->crc32 != expected_crc) return -5;            /* CRC error */",
+            f"    if (hdr->crc32 != expected_crc) return {p.name}_HDR_ERR_CRC;            /* CRC error */",
             "    /* Check opcode is known */",
             "    bool opcode_valid = false;",
             "    switch (hdr->opcode) {",
         ] + [f"        case {m.name}: opcode_valid = true; break;" for m in p.messages] + [
             "        default: break;",
             "    }",
-            "    if (!opcode_valid) return -6;                        /* unknown opcode */",
-            "    return 0;  /* OK */",
+            f"    if (!opcode_valid) return {p.name}_HDR_ERR_OPCODE;                        /* unknown opcode */",
+            f"    return {p.name}_HDR_OK;  /* OK */",
             "}",
             "",
             "/* === Per-message payload wire serialization functions === */",
@@ -975,7 +987,7 @@ def protocol_to_dict(proto: Protocol) -> dict:
         "messages": [
             {
                 "name":        m.name,
-                "opcode":      f"0x{m.opcode:02X}",
+                "opcode":      f"0x{m.opcode:04X}",
                 "direction":   m.direction,
                 "description": m.description,
                 "wire_size":   _msg_wire_size(m),
@@ -1049,7 +1061,7 @@ def protocol_to_yaml_dict(proto: Protocol) -> dict:
         "messages": [
             {
                 "name":        m.name,
-                "opcode":      f"0x{m.opcode:02X}",
+                "opcode":      f"0x{m.opcode:04X}",
                 "direction":   m.direction,
                 "description": m.description,
                 "wire_size":   _msg_wire_size(m),
@@ -1268,7 +1280,7 @@ class MarkdownDocEmitter:
         lines.append("| Opcode | Message Name | Direction | Payload Size | Description |")
         lines.append("|---|---|---|---|---|")
         for m in p.messages:
-            lines.append(f"| `0x{m.opcode:02X}` | `{m.name}` | `{m.direction}` | {_msg_wire_size(m)} bytes | {m.description} |")
+            lines.append(f"| `0x{m.opcode:04X}` | `{m.name}` | `{m.direction}` | {_msg_wire_size(m)} bytes | {m.description} |")
         lines.append("")
 
         if p.enums:
@@ -1287,7 +1299,7 @@ class MarkdownDocEmitter:
         lines.append(f"## {sec_idx}. Message Payload Specifications")
         lines.append("")
         for m in p.messages:
-            lines.append(f"### `0x{m.opcode:02X}`: {m.name}")
+            lines.append(f"### `0x{m.opcode:04X}`: {m.name}")
             lines.append("")
             lines.append(f"- **Direction**: `{m.direction}`")
             lines.append(f"- **Payload Wire Size**: `{_msg_wire_size(m)} bytes`")
@@ -1310,12 +1322,20 @@ class MarkdownDocEmitter:
                 lines.append("")
 
         sec_idx += 1
+        n = p.name.lower()
         lines.append(f"## {sec_idx}. Encoding & Validation Rules")
         lines.append("")
         lines.append("1. **Byte Order**: Multi-byte numeric fields are encoded on the wire in **" + p.endian + "-endian** byte order.")
         lines.append("2. **CRC Calculation**: Compute CRC-32 (ISO-HDLC polynomial `0xEDB88320`) over the 22-byte header with `crc32 = 0`, followed immediately by the wire-encoded payload bytes.")
-        lines.append("3. **Opcode Validation**: Any frame with an unknown `opcode` must be rejected with error code `-6` (`HDR_ERR_OPCODE`).")
-        lines.append("4. **Payload Bounds**: `payload_len` must strictly match the declared message structure size.")
+        lines.append(f"   - *CRC Contract*: `{n}_frame_crc()` accepts the header in **host byte order** and converts to wire order internally. Passing an already wire-encoded header is incorrect and causes double byte-swapping.")
+        lines.append("3. **Header Validation Error Codes** (`" + n + "_hdr_err_t`):")
+        lines.append(f"   - ` 0`: `{p.name}_HDR_OK` — Frame is valid.")
+        lines.append(f"   - `-1`: `{p.name}_HDR_ERR_MAGIC` — Magic constant mismatch (`magic != 0x{p.magic:08X}`).")
+        lines.append(f"   - `-2`: `{p.name}_HDR_ERR_VERSION` — Version mismatch (`version != 0x{p.version_major:02X}{p.version_minor:02X}`).")
+        lines.append(f"   - `-3`: `{p.name}_HDR_ERR_PAYLOAD_TOO_BIG` — `payload_len` exceeds `MY_PROTO_MAX_PAYLOAD` ({p.max_payload_size} B).")
+        lines.append(f"   - `-4`: `{p.name}_HDR_ERR_LEN_MISMATCH` — Received payload byte count does not match `payload_len`.")
+        lines.append(f"   - `-5`: `{p.name}_HDR_ERR_CRC` — Frame CRC-32 checksum mismatch.")
+        lines.append(f"   - `-6`: `{p.name}_HDR_ERR_OPCODE` — Opcode is unknown or unsupported.")
         lines.append("")
 
         return "\n".join(lines) + "\n"
