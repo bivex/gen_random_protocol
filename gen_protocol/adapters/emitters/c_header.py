@@ -94,10 +94,13 @@ class CHeaderEmitter(CodeEmitter):
             "#endif",
             "",
             "/* Portable IEEE-754 float/double conversion (no undefined behavior) */",
+            "#ifndef PROTO_FLOAT_HELPERS_",
+            "#define PROTO_FLOAT_HELPERS_",
             "static inline uint32_t proto_f32_to_u32_(float f) { uint32_t u; memcpy(&u, &f, sizeof(u)); return u; }",
             "static inline float    proto_u32_to_f32_(uint32_t u) { float f; memcpy(&f, &u, sizeof(f)); return f; }",
             "static inline uint64_t proto_f64_to_u64_(double d) { uint64_t u; memcpy(&u, &d, sizeof(u)); return u; }",
             "static inline double   proto_u64_to_f64_(uint64_t u) { double d; memcpy(&d, &u, sizeof(d)); return d; }",
+            "#endif",
             "",
             f"/* {p.name}: convert multi-byte fields between host and {p.endian}-endian wire order */",
         ]
