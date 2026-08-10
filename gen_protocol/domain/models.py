@@ -45,3 +45,12 @@ class Protocol:
     max_payload_size: int
     endian: str                       # "little" | "big"
     description: str
+
+
+@dataclass
+class MultiChainSuite:
+    name: str
+    seed: str
+    protocols: List[Protocol]
+    bridges: List[Tuple[str, str]]    # (from_proto, to_proto)
+

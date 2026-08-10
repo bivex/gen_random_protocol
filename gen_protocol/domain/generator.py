@@ -5,7 +5,7 @@ Protocol Generator Domain Service.
 from random import Random
 from typing import List, Optional, Set
 
-from gen_protocol.domain.models import Enum, Field, Message, Protocol
+from gen_protocol.domain.models import Enum, Field, Message, MultiChainSuite, Protocol
 from gen_protocol.domain.rules import calculate_magic, msg_wire_size, sanitize_proto_name
 from gen_protocol.domain.types import (
     C_TYPE_KEYS, C_TYPE_WEIGHTS, C_TYPES, FIELD_ADJECTIVES,
@@ -194,3 +194,56 @@ class ProtocolGenerator:
             endian=endian,
             description=desc_map.get(pattern, "Custom binary protocol"),
         )
+
+    def generate_multichain(self, count: int, *,
+                            name_prefix: Optional[str] = None,
+                            n_messages: Optional[int] = None,
+                            max_fields: Optional[int] = None,
+                            pattern: str = "auto") -> MultiChainSuite:
+        if count < 1 or count > 32:
+            raise ValueError("Multichain count must be between 1 and 32")
+
+        base_name = name_prefix.upper() if name_prefix else f"CHAIN_{self.seed[:6].upper()}"
+        protocols: List[Protocol] = []
+        bridges: List[tuple[str, str]] = []
+
+        for i in range(count):
+            sub_name = f"{base_name}_LINK_{i+1}"
+            proto = self.generate(
+                name_hint=sub_name,
+                n_messages=n_messages,
+                max_fields=max_fields,
+                pattern=pattern
+            )
+            protocols.append(proto)
+
+        # Inject cross-chain bridge messages between adjacent chain protocols
+        for i in range(count - 1):
+            src_p = protocols[i]
+            dst_p = protocols[i + 1]
+            bridges.append((src_p.name, dst_p.name))
+
+            bridge_msg_name = f"{src_p.name}_MSG_BRIDGE_TO_{dst_p.name}"
+            bridge_op = 0x00FE if not any(m.opcode == 0x00FE for m in src_p.messages) else 0x00FD
+            bridge_msg = Message(
+                name=bridge_msg_name,
+                opcode=bridge_op,
+                fields=[
+                    Field(name="target_magic", ctype="uint32_t", comment=f"Target chain magic constant (0x{dst_p.magic:08X})"),
+                    Field(name="target_opcode", ctype="uint16_t", comment="Target chain message opcode"),
+                    Field(name="tunnel_seq", ctype="uint32_t", comment="Cross-chain tunnel sequence counter"),
+                    Field(name="tunnel_payload", ctype="uint8_t", array_size=128, comment="Encapsulated cross-chain payload"),
+                ],
+                direction="C->S",
+                description=f"Tunnel bridge message encapsulating {dst_p.name} payload"
+            )
+            src_p.messages.append(bridge_msg)
+
+        suite_name = f"MULTICHAIN_{base_name}"
+        return MultiChainSuite(
+            name=suite_name,
+            seed=self.seed,
+            protocols=protocols,
+            bridges=bridges
+        )
+

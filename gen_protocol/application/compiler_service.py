@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from gen_protocol.domain.generator import ProtocolGenerator
-from gen_protocol.domain.models import Protocol
+from gen_protocol.domain.models import MultiChainSuite, Protocol
 from gen_protocol.domain.rules import log_seed, make_seed
 from gen_protocol.adapters.emitters.c_header import CHeaderEmitter
 from gen_protocol.adapters.emitters.c_source import CSourceEmitter
@@ -15,6 +15,8 @@ from gen_protocol.adapters.emitters.promela import PromelaEmitter
 from gen_protocol.adapters.emitters.markdown_doc import MarkdownDocEmitter
 from gen_protocol.adapters.emitters.json_manifest import JsonManifestEmitter
 from gen_protocol.adapters.emitters.yaml_spec import YamlSpecEmitter
+from gen_protocol.adapters.emitters.multichain_doc import MultiChainMarkdownEmitter
+from gen_protocol.adapters.emitters.multichain_manifest import MultiChainManifestEmitter
 from gen_protocol.adapters.idl.yaml_loader import YamlSpecLoader
 from gen_protocol.adapters.verifiers.spin_verifier import SpinVerifier
 
@@ -85,6 +87,74 @@ class ProtocolCompilerService:
             json_manifest=json_manifest,
             verbose=verbose
         )
+
+    def generate_multichain(self, count: int, *,
+                            seed_hex: Optional[str] = None,
+                            name_prefix: Optional[str] = None,
+                            n_messages: Optional[int] = None,
+                            max_fields: Optional[int] = None,
+                            pattern: str = "auto",
+                            run_spin: bool = False,
+                            no_verify: bool = False,
+                            no_impl: bool = False,
+                            doc: bool = False,
+                            export_spec: bool = False,
+                            json_manifest: bool = False,
+                            verbose: bool = False) -> MultiChainSuite:
+        seed = seed_hex if seed_hex else make_seed()
+        seed_bytes = bytes.fromhex(seed)
+        seed_int = int.from_bytes(seed_bytes, "big")
+        rng = Random(seed_int)
+
+        gen = ProtocolGenerator(rng, seed)
+        suite = gen.generate_multichain(
+            count,
+            name_prefix=name_prefix,
+            n_messages=n_messages,
+            max_fields=max_fields,
+            pattern=pattern
+        )
+
+        log_seed(seed, suite.name)
+        print(f"[gen_protocol]  multichain seed = {seed}")
+        print(f"[gen_protocol]  generating {count} interconnected protocols for suite '{suite.name}'...")
+
+        suite_dir = self.out_dir if self.out_dir else Path(f"out/{suite.name.lower()}")
+        suite_dir.mkdir(parents=True, exist_ok=True)
+
+        # Emit MultiChain Documentation and Manifest
+        if doc or True:
+            spec_md = MultiChainMarkdownEmitter(suite).emit()
+            spec_file = suite_dir / "MULTICHAIN_SPEC.md"
+            spec_file.write_text(spec_md)
+            print(f"[gen_protocol]  wrote {spec_file}")
+
+        if json_manifest or True:
+            manifest_json = MultiChainManifestEmitter(suite).emit()
+            manifest_file = suite_dir / "multichain_manifest.json"
+            manifest_file.write_text(manifest_json)
+            print(f"[gen_protocol]  wrote {manifest_file}")
+
+        # Emit each chain protocol link into its subdirectory
+        for i, proto in enumerate(suite.protocols):
+            sub_service = ProtocolCompilerService(out_dir=suite_dir / proto.name.lower())
+            sub_service._emit_and_verify(
+                proto,
+                run_spin=run_spin,
+                no_verify=no_verify,
+                no_impl=no_impl,
+                doc=doc,
+                export_spec=export_spec,
+                json_manifest=json_manifest,
+                verbose=verbose
+            )
+
+        print(f"\n[gen_protocol]  MultiChain Suite : {suite.name}")
+        print(f"                Chain Count     : {len(suite.protocols)}")
+        print(f"                Bridges Built   : {len(suite.bridges)}")
+        print(f"                Suite Dir       : {suite_dir}\n")
+
+        return suite
 
     def _emit_and_verify(self, proto: Protocol, *,
                          run_spin: bool = False,

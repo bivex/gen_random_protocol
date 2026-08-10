@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--messages",     type=int,       help="Number of message types (1..254, default: 4-16)")
     p.add_argument("-f", "--fields",       type=int,       help="Max fields per struct (1..64, default: 3-10)")
     p.add_argument("-p", "--pattern",      choices=["auto"] + PATTERNS, default="auto", help="Protocol pattern (default: auto)")
+    p.add_argument("-c", "--multichain", "--chains", type=int, metavar="COUNT", help="Generate a MultiChain suite of COUNT interconnected protocols (1..32)")
     p.add_argument("--spec",               metavar="FILE", help="Compile protocol from YAML/JSON IDL specification file")
     p.add_argument("--export-spec",        action="store_true", help="Export declarative protocol.yaml IDL specification")
     p.add_argument("--doc",                action="store_true", help="Generate human-readable PROTOCOL_SPEC.md documentation")
@@ -51,6 +52,9 @@ def main(argv=None) -> int:
         list_seeds()
         return 0
 
+    if args.multichain is not None and not (1 <= args.multichain <= 32):
+        parser.error("-c / --multichain must be between 1 and 32")
+
     if args.messages is not None and not (1 <= args.messages <= 254):
         parser.error("-m / --messages must be between 1 and 254")
 
@@ -66,7 +70,23 @@ def main(argv=None) -> int:
     service = ProtocolCompilerService(out_dir=out_dir)
 
     try:
-        if args.spec:
+        if args.multichain:
+            service.generate_multichain(
+                args.multichain,
+                seed_hex=args.seed,
+                name_prefix=args.name,
+                n_messages=args.messages,
+                max_fields=args.fields,
+                pattern=args.pattern,
+                run_spin=args.spin,
+                no_verify=args.no_verify,
+                no_impl=args.no_impl,
+                doc=args.doc,
+                export_spec=args.export_spec,
+                json_manifest=args.json,
+                verbose=args.verbose
+            )
+        elif args.spec:
             service.compile_from_spec(
                 Path(args.spec),
                 run_spin=args.spin,
