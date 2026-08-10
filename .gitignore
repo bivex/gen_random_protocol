@@ -1,11 +1,26 @@
 # Generated protocol output
 out/
+scratch/
 
 # Seed log (local machine state)
 .protocol_seeds.jsonl
+
+# OS / System
+.DS_Store
+Thumbs.db
+
+# C / Build artifacts
+*.o
+*.so
+*.dylib
+*.a
+pan
+pan_*
+_spin_nvr.tmp
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .venv/
+.pytest_cache/
