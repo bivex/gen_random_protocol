@@ -3,7 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![C Standard](https://img.shields.io/badge/c-C99%20%2F%20C11-green.svg)](https://en.wikipedia.org/wiki/C99)
 [![Formal Verification](https://img.shields.io/badge/verification-SPIN%20BMC-purple.svg)](https://spinroot.com/)
-[![Architecture](https://img.shields.io/badge/architecture-DDD%20%2F%20Hexagonal-blueviolet.svg)](MULTICHAIN_GUIDE.md)
+[![Architecture](https://img.shields.io/badge/architecture-DDD%20%2F%20Hexagonal-blueviolet.svg)](docs/MULTICHAIN_GUIDE.md)
 [![IDL Specification](https://img.shields.io/badge/IDL-YAML%20%2F%20JSON-orange.svg)](https://yaml.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -184,7 +184,7 @@ messages:
 ## 📖 Additional Documentation
 
 For deep technical details on multi-hop cross-chain data transmission, Promela LTL claims, and C runtime integration, see:
-- [MultiChain Technical Guide](MULTICHAIN_GUIDE.md)
+- [MultiChain Technical Guide](docs/MULTICHAIN_GUIDE.md)
 
 ---
 
