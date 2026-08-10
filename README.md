@@ -183,8 +183,9 @@ messages:
 
 ## 📖 Additional Documentation
 
-For deep technical details on multi-hop cross-chain data transmission, Promela LTL claims, and C runtime integration, see:
+For deep technical details on multi-hop cross-chain data transmission, Promela LTL claims, C runtime integration, and theoretical state space limits, see:
 - [MultiChain Technical Guide](docs/MULTICHAIN_GUIDE.md)
+- [Theoretical Limits & Combinatorial Entropy Proof](docs/ENTROPY_AND_COMBINATORICS.md)
 
 ---
 
