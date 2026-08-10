@@ -1,33 +1,40 @@
-# gen_protocol.py — Random C Protocol & IDL Compiler (VIQ)
+# gen_protocol.py — Random C Protocol & MultiChain Compiler (VIQ)
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![C Standard](https://img.shields.io/badge/c-C99%20%2F%20C11-green.svg)](https://en.wikipedia.org/wiki/C99)
 [![Formal Verification](https://img.shields.io/badge/verification-SPIN%20BMC-purple.svg)](https://spinroot.com/)
+[![Architecture](https://img.shields.io/badge/architecture-DDD%20%2F%20Hexagonal-blueviolet.svg)](MULTICHAIN_GUIDE.md)
 [![IDL Specification](https://img.shields.io/badge/IDL-YAML%20%2F%20JSON-orange.svg)](https://yaml.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**gen_protocol.py** is a high-performance **binary protocol generator and IDL compiler** for C. It produces cryptographically seeded, collision-resistant C binary protocols or compiles declarative **YAML/JSON IDL** schemas into portable C headers (`.h`), implementation stubs (`.c`), formal **Promela SPIN** verification models (`.pml`), machine-readable manifests (`.json`), and human-readable **RFC Markdown specifications** (`PROTOCOL_SPEC.md`).
+**gen_protocol.py** is a high-performance **binary protocol generator, MultiChain suite builder, and IDL compiler** for C, structured on **Domain-Driven Design (DDD) & Hexagonal Architecture**. 
+
+It produces cryptographically seeded C binary protocols, multi-node **MultiChain interconnected network suites**, or compiles declarative **YAML/JSON IDL** schemas into portable C headers (`.h`), implementation stubs (`.c`), formal **Promela SPIN** verification models (`.pml`), machine-readable manifests (`.json`), and human-readable **RFC Markdown specifications** (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`).
 
 ---
 
-## 📐 Pipeline Architecture
+## 📐 Domain-Driven Hexagonal Architecture
 
 ```text
-       Declarative Spec                    Random Spec Generator
-       (protocol.yaml)                     (Cryptographic Seed)
-              │                                      │
-              └──────────────────┬───────────────────┘
-                                 │
-                                 ▼
-                     ┌───────────────────────┐
-                     │   gen_protocol.py     │
-                     │  Protocol Compiler    │
-                     └───────────┬───────────┘
-                                 │
-        ┌────────────────────────┼────────────────────────┐
-        ▼                        ▼                        ▼
-   C Header/Source         Promela Model             Markdown Spec
-  (c_codegen .h/.c)      (pml_gen + SPIN)            (doc_gen .md)
+               ┌───────────────────────────────────────────────┐
+               │              CLI / Presentation               │
+               │               (gen_protocol/cli)              │
+               └───────────────────────┬───────────────────────┘
+                                       │
+                                       ▼
+               ┌───────────────────────────────────────────────┐
+               │           Application Service                 │
+               │   (gen_protocol/application/compiler_service) │
+               └──────┬─────────────────────────────────┬──────┘
+                      │                                 │
+                      ▼                                 ▼
+   ┌────────────────────────────────────┐    ┌────────────────────────────────────┐
+   │            Domain Layer            │    │            Adapters Layer          │
+   │  - ProtocolGenerator               │    │  - CHeaderEmitter (.h)             │
+   │  - MultiChainSuite entity          │    │  - CSourceEmitter (.c)             │
+   │  - 22B Wire Header rules           │    │  - PromelaEmitter (.pml)           │
+   │  - CRC-32 & Byte Swapping rules    │    │  - SpinVerifier (SPIN CLI)         │
+   └────────────────────────────────────┘    └────────────────────────────────────┘
 ```
 
 ---
@@ -36,6 +43,7 @@
 
 | Feature | Description & Implementation Guarantees |
 |---------|------------------------------------------|
+| **MultiChain Protocol Suites** | Generate $N$ interconnected protocols (`-c N` / `--multichain N`) with cross-chain bridge frame tunneling (`*_MSG_BRIDGE_TO_*`). |
 | **22-Byte Frame Header** | Fixed 22-byte canonical wire header (`magic`, `version`, `opcode`, `session_id`, `sequence`, `payload_len`, `crc32`). |
 | **Declarative IDL** | Import and compile custom protocol definitions from **YAML** (`protocol.yaml`) or **JSON** schemas via `--spec`. |
 | **Formal Verification** | Auto-generates **Promela SPIN (`.pml`)** models and executes **Bounded Model Checking (BMC)** with 100% state reachability. |
@@ -44,7 +52,25 @@
 | **Bitfields & Arrays** | Portable integer storage with auto-generated bitmask getters/setters (`GET_*`, `SET_*`) and fixed array support. |
 | **Frame CRC Integrity** | CRC-32/ISO-HDLC computed over `header(crc=0) || payload`. Internal double-swap protection built into `frame_crc()`. |
 | **Validation Error Enum** | Explicit header validation error codes (`MY_PROTO_HDR_ERR_*`) returnable by `hdr_validate()`. |
-| **Markdown Documentation** | Generates human-readable RFC-style specifications (`PROTOCOL_SPEC.md`) with ASCII header diagrams and opcode tables. |
+| **Markdown Documentation** | Generates human-readable RFC-style specifications (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`). |
+
+---
+
+## 🌐 MultiChain Cross-Chain Network Topology
+
+```text
+[Node 1: Link 1] ──(Bridge Opcode 0x00FE)──> [Node 2: Link 2] ──(Bridge Opcode 0x00FE)──> ... ──> [Node N: Link N]
+```
+
+Each protocol link $L_i$ in a MultiChain suite includes an encapsulated tunnel bridge frame:
+```c
+typedef struct PROTO_PACKED {
+    uint32_t     target_magic;        /* Magic constant of destination protocol */
+    uint16_t     target_opcode;       /* Message opcode for target chain node */
+    uint32_t     tunnel_seq;          /* Cross-chain tunnel sequence counter */
+    uint8_t      tunnel_payload[128]; /* Encapsulated cross-chain data payload */
+} chain_link_i_msg_bridge_to_chain_link_i_plus_1_t;
+```
 
 ---
 
@@ -88,13 +114,16 @@ All frames transmitted over the wire begin with the fixed 22-byte header:
 # 1. Generate a fully random protocol with SPIN verification, YAML IDL export, and Markdown spec
 python3 gen_protocol.py -n MY_PROTO -p rpc --spin --export-spec --doc
 
-# 2. Compile C code and Promela verification model from a declarative protocol.yaml IDL
+# 2. Generate a MultiChain suite of 5 interconnected protocols with cross-chain tunneling
+python3 gen_protocol.py --multichain 5 --spin --doc --json
+
+# 3. Compile C code and Promela verification model from a declarative protocol.yaml IDL
 python3 gen_protocol.py --spec protocol.yaml --spin -o out/my_proto_compiled
 
-# 3. Reproduce a past run via seed
+# 4. Reproduce a past run via seed
 python3 gen_protocol.py --seed 807d5084d2da4e06178c1062a4ef9abd --spin
 
-# 4. List past seed history
+# 5. List past seed history
 python3 gen_protocol.py --list-seeds
 ```
 
@@ -106,6 +135,7 @@ python3 gen_protocol.py --list-seeds
 |------|-----------|-------------|-----------------|
 | `-o` | `--output DIR` | Output directory | `./out/<proto_name>/` |
 | `-n` | `--name NAME` | Force protocol name prefix (sanitized) | Random |
+| `-c` | `--multichain N`, `--chains N` | Generate a MultiChain suite of N interconnected protocols | `1–32` |
 | `-m` | `--messages N` | Number of message types | `4–16` (range `1–254`) |
 | `-f` | `--fields N` | Max fields per struct | `3–10` (range `1–64`) |
 | `-p` | `--pattern P` | Protocol pattern (`auto`, `reqrsp`, `stream`, `pubsub`, `rpc`, `fsm`) | `auto` |
@@ -147,84 +177,14 @@ messages:
       - { name: client_id, type: u32, comment: "Client unique integer ID" }
       - { name: flags, type: u8, bits: 4, comment: "Client operational flags" }
       - { name: buffer, type: u8, array_size: 64, comment: "Payload buffer" }
-
-  - name: DISCONNECT
-    opcode: 0x0002
-    direction: C->S
-    description: "Gracefully disconnect client"
-    fields:
-      - { name: reason, type: u8, comment: "Reason code for disconnection" }
 ```
 
 ---
 
-## 💻 C API & Usage Example
+## 📖 Additional Documentation
 
-```c
-#include "my_proto.h"
-#include <stdio.h>
-#include <assert.h>
-
-void send_frame(uint16_t opcode, uint32_t session_id, uint32_t sequence) {
-    // 1. Initialise header (Host byte order)
-    my_proto_hdr_t hdr;
-    my_proto_msg_connect_t payload;
-    
-    payload.client_id = 1001;
-    payload.flags = 0x05;
-    
-    // Encode payload fields to wire byte order
-    my_proto_msg_connect_encode(&payload);
-
-    my_proto_hdr_init(&hdr, opcode, session_id, sequence, sizeof(payload));
-
-    // 2. Compute frame CRC (takes host header, converts to wire order with crc=0)
-    hdr.crc32 = my_proto_frame_crc(&hdr, &payload, sizeof(payload));
-
-    // 3. Convert header to wire byte order
-    my_proto_hdr_encode(&hdr);
-
-    // Send over socket/wire
-    // send_bytes(&hdr, sizeof(hdr));
-    // send_bytes(&payload, sizeof(payload));
-}
-
-void receive_frame(const my_proto_hdr_t *wire_hdr, const void *wire_payload, size_t payload_len) {
-    // 1. Decode header to Host byte order
-    my_proto_hdr_t hdr = *wire_hdr;
-    my_proto_hdr_decode(&hdr);
-
-    // 2. Validate header, magic, version, payload bounds, opcode, and CRC-32
-    int status = my_proto_hdr_validate(&hdr, wire_payload, payload_len);
-    if (status != MY_PROTO_HDR_OK) {
-        // Error handling based on my_proto_hdr_err_t enum
-        printf("Validation error: %d\n", status);
-        return;
-    }
-
-    // 3. Decode message payload
-    if (hdr.opcode == MY_PROTO_MSG_CONNECT) {
-        my_proto_msg_connect_t payload;
-        memcpy(&payload, wire_payload, sizeof(payload));
-        my_proto_msg_connect_decode(&payload);
-        printf("Received CONNECT from client %u\n", payload.client_id);
-    }
-}
-```
-
----
-
-## 🚨 Header Validation Error Codes (`my_proto_hdr_err_t`)
-
-| Return Code | Macro Constant | Description |
-|---|---|---|
-| `0` | `MY_PROTO_HDR_OK` | Frame header and payload are valid. |
-| `-1` | `MY_PROTO_HDR_ERR_MAGIC` | Invalid magic constant (`magic != MY_PROTO_MAGIC`). |
-| `-2` | `MY_PROTO_HDR_ERR_VERSION` | Version mismatch (`version != MY_PROTO_VERSION`). |
-| `-3` | `MY_PROTO_HDR_ERR_PAYLOAD_TOO_BIG` | Payload length exceeds `MY_PROTO_MAX_PAYLOAD`. |
-| `-4` | `MY_PROTO_HDR_ERR_LEN_MISMATCH` | Payload buffer length mismatch. |
-| `-5` | `MY_PROTO_HDR_ERR_CRC` | Frame CRC-32 checksum mismatch. |
-| `-6` | `MY_PROTO_HDR_ERR_OPCODE` | Opcode is unknown or unsupported. |
+For deep technical details on multi-hop cross-chain data transmission, Promela LTL claims, and C runtime integration, see:
+- [MultiChain Technical Guide](MULTICHAIN_GUIDE.md)
 
 ---
 
