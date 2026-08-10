@@ -1525,7 +1525,7 @@ class PromelaEmitter:
     """
 
     CHAN_BUF = 8          # channel buffer depth
-    MAX_ITER = 4          # bounded loop unroll for model checking
+    MAX_ITER = 2          # bounded loop unroll for exhaustive opcode model checking
     SPIN_VERSION = 6      # target SPIN 6.x ltl syntax
 
     def __init__(self, proto: Protocol) -> None:
@@ -1668,9 +1668,6 @@ class PromelaEmitter:
     def _send_choice(self, chan: str, msgs: list[Message], indent: str = "        ") -> str:
         if not msgs:
             msgs = self.p.messages
-        # Sample representative subset if message list is large to maintain fast SPIN verification time
-        if len(msgs) > 3:
-            msgs = [msgs[0], msgs[len(msgs) // 2], msgs[-1]]
         if len(msgs) == 1:
             sym = self._sym(msgs[0])
             return (
