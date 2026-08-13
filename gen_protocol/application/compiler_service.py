@@ -123,13 +123,13 @@ class ProtocolCompilerService:
         suite_dir.mkdir(parents=True, exist_ok=True)
 
         # Emit MultiChain Documentation and Manifest
-        if doc or True:
+        if doc:
             spec_md = MultiChainMarkdownEmitter(suite).emit()
             spec_file = suite_dir / "MULTICHAIN_SPEC.md"
             spec_file.write_text(spec_md)
             print(f"[gen_protocol]  wrote {spec_file}")
 
-        if json_manifest or True:
+        if json_manifest:
             manifest_json = MultiChainManifestEmitter(suite).emit()
             manifest_file = suite_dir / "multichain_manifest.json"
             manifest_file.write_text(manifest_json)

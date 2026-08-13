@@ -35,6 +35,22 @@ class ProtocolGenerator:
         used.add(name)
         return name
 
+    def _free_opcode(self, proto: Protocol, prefer: tuple = ()) -> int:
+        """Return an opcode in 0x01..0xFE not yet used by proto.
+
+        Tries the preferred values first, then scans the full valid range.
+        Used for injected messages (e.g. cross-chain bridges) that must not
+        collide with randomly assigned message opcodes.
+        """
+        used = {m.opcode for m in proto.messages}
+        for op in prefer:
+            if op not in used:
+                return op
+        for op in range(0x01, 0x00FF):  # 0x01..0xFE inclusive
+            if op not in used:
+                return op
+        raise ValueError(f"{proto.name}: no free opcode available for injected message")
+
     def proto_name(self, forced: Optional[str]) -> str:
         if forced:
             clean = sanitize_proto_name(forced)
@@ -224,7 +240,7 @@ class ProtocolGenerator:
             bridges.append((src_p.name, dst_p.name))
 
             bridge_msg_name = f"{src_p.name}_MSG_BRIDGE_TO_{dst_p.name}"
-            bridge_op = 0x00FE if not any(m.opcode == 0x00FE for m in src_p.messages) else 0x00FD
+            bridge_op = self._free_opcode(src_p, prefer=(0x00FE, 0x00FD, 0x00FC, 0x00FB))
             bridge_msg = Message(
                 name=bridge_msg_name,
                 opcode=bridge_op,

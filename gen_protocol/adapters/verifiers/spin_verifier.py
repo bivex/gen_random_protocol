@@ -121,6 +121,6 @@ class SpinVerifier(ModelVerifier):
             except OSError:
                 pass
 
-        res_str = "✓ PASS — PASS — no errors found" if overall_pass else "✗ FAIL — errors found"
+        res_str = "✓ PASS — no errors found" if overall_pass else "✗ FAIL — errors found"
         print(f"\n[spin]  Overall result: {res_str}\n")
         return report_data

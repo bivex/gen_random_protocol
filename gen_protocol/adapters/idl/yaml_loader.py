@@ -12,6 +12,26 @@ from gen_protocol.domain.types import IDL_TO_C_TYPE
 from gen_protocol.ports.idl import SpecLoader
 
 
+_VALID_IDL_TYPES = set(IDL_TO_C_TYPE.keys())
+_INT_CTYPES = {
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+}
+_OPCODE_MIN = 0x0001
+_OPCODE_MAX = 0xFFFE
+
+
+def _parse_opcode(raw) -> int:
+    """Parse an opcode literal (int, or decimal/'0x' hex string) and return an int."""
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.lower().startswith("0x") or s.lower().startswith("-0x"):
+            return int(s, 16)
+        return int(s, 10)
+    return int(raw)
+
+
+
 class YamlSpecLoader(SpecLoader):
     def load(self, path: Path) -> Protocol:
         if not path.exists():
@@ -49,18 +69,60 @@ class YamlSpecLoader(SpecLoader):
             enums.append(Enum(name=e["name"], members=members))
 
         messages = []
+        seen_ops: set = set()
         for m in data.get("messages", []):
-            op_raw = m.get("opcode", "0x0001")
-            op = int(op_raw, 16) if isinstance(op_raw, str) and op_raw.startswith("0x") else int(op_raw)
+            mname = m.get("name", "<unnamed>")
+            op = _parse_opcode(m.get("opcode", "0x0001"))
+            if not (_OPCODE_MIN <= op <= _OPCODE_MAX):
+                raise ValueError(
+                    f"message {mname!r}: opcode 0x{op:04X} out of range "
+                    f"[0x{_OPCODE_MIN:04X}..0x{_OPCODE_MAX:04X}]"
+                )
+            if op in seen_ops:
+                raise ValueError(f"message {mname!r}: duplicate opcode 0x{op:04X}")
+            seen_ops.add(op)
+
             fields = []
+            seen_field_names: set = set()
             for f in m.get("fields", []):
+                fname = f.get("name")
+                if not fname:
+                    raise ValueError(f"message {mname!r}: field is missing a 'name'")
+                if fname in seen_field_names:
+                    raise ValueError(f"message {mname!r}: duplicate field name {fname!r}")
+                seen_field_names.add(fname)
+
                 idl_type = f.get("type", "u32")
-                ctype = IDL_TO_C_TYPE.get(idl_type, idl_type)
+                if idl_type not in _VALID_IDL_TYPES:
+                    raise ValueError(
+                        f"message {mname!r} field {fname!r}: unknown type {idl_type!r}; "
+                        f"valid types: {sorted(_VALID_IDL_TYPES)}"
+                    )
+                ctype = IDL_TO_C_TYPE[idl_type]
+
+                bits = f.get("bits")
+                if bits is not None:
+                    if ctype not in _INT_CTYPES:
+                        raise ValueError(
+                            f"message {mname!r} field {fname!r}: 'bits' is only valid on integer "
+                            f"types, not {idl_type!r} ({ctype})"
+                        )
+                    if not (1 <= int(bits) <= 64):
+                        raise ValueError(
+                            f"message {mname!r} field {fname!r}: 'bits' must be between 1 and 64, got {bits}"
+                        )
+
+                array_size = f.get("array_size")
+                if array_size is not None and int(array_size) < 1:
+                    raise ValueError(
+                        f"message {mname!r} field {fname!r}: 'array_size' must be >= 1, got {array_size}"
+                    )
+
                 fields.append(Field(
-                    name=f["name"],
+                    name=fname,
                     ctype=ctype,
-                    bits=f.get("bits"),
-                    array_size=f.get("array_size"),
+                    bits=bits,
+                    array_size=array_size,
                     comment=f.get("comment", "")
                 ))
             messages.append(Message(
