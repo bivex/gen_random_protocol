@@ -92,6 +92,8 @@ FIELD_SEMANTIC_RULES: Dict[str, Dict] = {
     "addr":      {"types": ("u8", "u32"), "allow_bitfield": False, "array_if_u8": (4, 16), "comment": "Network address (IPv4/IPv6)"},
     "ip":        {"types": ("u8", "u32"), "allow_bitfield": False, "array_if_u8": (4, 16), "comment": "IP address"},
     "host":      {"types": ("u8", "u32"), "allow_bitfield": False, "array_if_u8": (4, 16), "comment": "Host address"},
+    "src":       {"types": ("u8", "u32"), "allow_bitfield": False, "array_if_u8": (4, 16), "comment": "Source address (IPv4/IPv6)"},
+    "dst":       {"types": ("u8", "u32"), "allow_bitfield": False, "array_if_u8": (4, 16), "comment": "Destination address (IPv4/IPv6)"},
     "port":      {"types": ("u16",), "allow_bitfield": False, "array": None, "comment": "Network port number"},
 
     # Timestamps / Epochs
@@ -103,9 +105,11 @@ FIELD_SEMANTIC_RULES: Dict[str, Dict] = {
     "seq":       {"types": ("u16", "u32", "u64"), "allow_bitfield": False, "array": None, "comment": "Sequence number"},
     "sequence":  {"types": ("u16", "u32", "u64"), "allow_bitfield": False, "array": None, "comment": "Sequence counter"},
     "ack":       {"types": ("u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Acknowledgement sequence"},
+    "window":    {"types": ("u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Flow-control window size"},
     "nonce":     {"types": ("u8", "u32", "u64"), "allow_bitfield": False, "array_if_u8": (8, 12, 16), "comment": "Anti-replay nonce"},
     "session":   {"types": ("u32", "u64"), "allow_bitfield": False, "array": None, "comment": "Session identifier"},
     "stream":    {"types": ("u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Stream channel ID"},
+    "channel":   {"types": ("u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Logical channel identifier"},
     "id":        {"types": ("u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Entity identifier"},
 
     # Control / Flags / Status / Codes / Types
@@ -113,6 +117,9 @@ FIELD_SEMANTIC_RULES: Dict[str, Dict] = {
     "mask":      {"types": ("u8", "u16", "u32"), "allow_bitfield": True, "array": None, "comment": "Bitmask filter"},
     "mode":      {"types": ("u8", "u16"), "allow_bitfield": True, "array": None, "comment": "Operating mode flags"},
     "status":    {"types": ("u8", "u16"), "allow_bitfield": True, "array": None, "comment": "Status flags"},
+    "ctrl":      {"types": ("u8", "u16", "u32"), "allow_bitfield": True, "array": None, "comment": "Control flags"},
+    "cfg":       {"types": ("u8", "u16", "u32"), "allow_bitfield": True, "array": None, "comment": "Configuration flags"},
+    "version":   {"types": ("u8", "u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Protocol or schema version"},
     "type":      {"types": ("u8", "u16"), "allow_bitfield": False, "array": None, "comment": "Subtype code"},
     "subtype":   {"types": ("u8", "u16"), "allow_bitfield": False, "array": None, "comment": "Secondary type code"},
     "code":      {"types": ("u8", "u16", "u32"), "allow_bitfield": False, "array": None, "comment": "Status or error code"},
