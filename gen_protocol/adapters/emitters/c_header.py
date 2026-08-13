@@ -230,6 +230,7 @@ class CHeaderEmitter(CodeEmitter):
             "",
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len);",
+            f"bool {n}_seq_validate(uint32_t incoming_seq, uint32_t *last_seq);",
             f"const char *{n}_opcode_str(uint16_t opcode);",
             "",
             "/* === Per-message payload serialization prototypes === */",

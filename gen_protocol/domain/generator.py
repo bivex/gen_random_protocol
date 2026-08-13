@@ -9,7 +9,7 @@ from gen_protocol.domain.models import Enum, Field, Message, MultiChainSuite, Pr
 from gen_protocol.domain.rules import calculate_magic, msg_wire_size, sanitize_proto_name
 from gen_protocol.domain.types import (
     C_TYPE_KEYS, C_TYPE_WEIGHTS, C_TYPES, FIELD_ADJECTIVES,
-    MSG_VERBS, PATTERNS, PROTO_NOUNS, PROTO_SUFFIXES
+    FIELD_SEMANTIC_RULES, MSG_VERBS, PATTERNS, PROTO_NOUNS, PROTO_SUFFIXES
 )
 
 
@@ -64,20 +64,40 @@ class ProtocolGenerator:
     def _gen_field(self, used_names: Set[str],
                    allow_array: bool = True,
                    allow_bitfield: bool = True) -> Field:
-        adj = self._pick(FIELD_ADJECTIVES)
+        avail_adjs = [a for a in FIELD_ADJECTIVES if a not in used_names]
+        adj = self._pick(avail_adjs) if avail_adjs else self._pick(FIELD_ADJECTIVES)
         name = self._unique_name(adj, used_names)
-        tkey = self._weighted_pick(C_TYPE_KEYS, C_TYPE_WEIGHTS)
-        ctype, _ = C_TYPES[tkey]
 
-        bits = None
-        array_size = None
+        rule = FIELD_SEMANTIC_RULES.get(adj)
+        if rule:
+            tkey = self._pick(rule["types"])
+            ctype, _ = C_TYPES[tkey]
 
-        if allow_bitfield and tkey.startswith("u") and self.rng.random() < 0.18:
-            bits = self.rng.choice([1, 2, 3, 4])
-        elif allow_array and self.rng.random() < 0.22:
-            array_size = self.rng.choice([4, 8, 16, 32, 64, 128, 256])
+            array_size = None
+            if rule.get("array"):
+                array_size = self._pick(rule["array"])
+            elif tkey == "u8" and rule.get("array_if_u8"):
+                array_size = self._pick(rule["array_if_u8"])
+            elif allow_array and tkey in ("u8", "f32", "f64") and self.rng.random() < 0.15:
+                array_size = self.rng.choice([4, 8, 16])
 
-        comment = f"Protocol {name} field carry ({tkey})"
+            bits = None
+            if (allow_bitfield and rule.get("allow_bitfield") and array_size is None
+                    and tkey in ("u8", "u16") and self.rng.random() < 0.30):
+                bits = self.rng.choice([1, 2, 3, 4]) if tkey == "u8" else self.rng.choice([1, 2, 3, 4, 8])
+
+            comment = f"{rule['comment']} ({tkey})"
+        else:
+            tkey = self._weighted_pick(C_TYPE_KEYS, C_TYPE_WEIGHTS)
+            ctype, _ = C_TYPES[tkey]
+            bits = None
+            array_size = None
+            if allow_bitfield and tkey in ("u8", "u16") and self.rng.random() < 0.18:
+                bits = self.rng.choice([1, 2, 3, 4])
+            elif allow_array and self.rng.random() < 0.22:
+                array_size = self.rng.choice([4, 8, 16, 32])
+            comment = f"Protocol {name} field carry ({tkey})"
+
         return Field(name=name, ctype=ctype, bits=bits,
                      array_size=array_size, comment=comment)
 
@@ -100,8 +120,9 @@ class ProtocolGenerator:
         return Enum(name=enum_name, members=vals)
 
     def _gen_message(self, proto_name: str,
-                     used_ops: Set[int], used_names: Set[str],
-                     max_fields: int, pattern: str) -> Message:
+                      used_ops: Set[int], used_names: Set[str],
+                      used_verbs: Set[str],
+                      max_fields: int, pattern: str) -> Message:
         if len(used_ops) >= 254:
             raise ValueError("Cannot generate more than 254 unique opcodes per protocol")
 
@@ -110,7 +131,14 @@ class ProtocolGenerator:
             op = self.rng.randint(0x01, 0xFE)
         used_ops.add(op)
 
-        verb = self._pick(MSG_VERBS)
+        avail_verbs = [v for v in MSG_VERBS if v not in used_verbs]
+        if avail_verbs:
+            verb = self._pick(avail_verbs)
+        else:
+            prefix = self._pick(["SET", "GET", "ASYNC", "QUERY", "NOTIFY"])
+            verb = f"{prefix}_{self._pick(MSG_VERBS)}"
+        used_verbs.add(verb)
+
         name = self._unique_name(f"{proto_name}_MSG_{verb}", used_names)
 
         injected_count = 2 if pattern in ("rpc", "stream") else (1 if pattern in ("reqrsp", "pubsub", "fsm") else 0)
@@ -171,10 +199,11 @@ class ProtocolGenerator:
 
         used_ops: Set[int] = set()
         used_names: Set[str] = set()
+        used_verbs: Set[str] = set()
         messages: List[Message] = []
 
         for _ in range(n_msg):
-            msg = self._gen_message(name, used_ops, used_names, m_fld, pattern)
+            msg = self._gen_message(name, used_ops, used_names, used_verbs, m_fld, pattern)
             messages.append(msg)
 
         enums: List[Enum] = [
