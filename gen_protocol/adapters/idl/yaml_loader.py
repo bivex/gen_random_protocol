@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 from gen_protocol.domain.models import Enum, Field, Message, Protocol
-from gen_protocol.domain.rules import calculate_magic, make_seed, msg_wire_size, sanitize_proto_name
+from gen_protocol.domain.rules import (
+    calculate_magic, field_wire_size, make_seed, msg_wire_size, sanitize_proto_name
+)
 from gen_protocol.domain.types import IDL_TO_C_TYPE
 from gen_protocol.ports.idl import SpecLoader
 
@@ -17,8 +19,16 @@ _INT_CTYPES = {
     "uint8_t", "uint16_t", "uint32_t", "uint64_t",
     "int8_t", "int16_t", "int32_t", "int64_t",
 }
+_INT_WIDTH = {
+    "uint8_t": 8, "int8_t": 8,
+    "uint16_t": 16, "int16_t": 16,
+    "uint32_t": 32, "int32_t": 32,
+    "uint64_t": 64, "int64_t": 64,
+}
 _OPCODE_MIN = 0x0001
 _OPCODE_MAX = 0xFFFE
+# Header payload_len is a uint16 (2 octets) per the wire format.
+_MAX_PAYLOAD_BYTES = 0xFFFF
 
 
 def _parse_opcode(raw) -> int:
@@ -101,18 +111,26 @@ class YamlSpecLoader(SpecLoader):
                 ctype = IDL_TO_C_TYPE[idl_type]
 
                 bits = f.get("bits")
+                array_size = f.get("array_size")
+                if bits is not None and array_size is not None:
+                    raise ValueError(
+                        f"message {mname!r} field {fname!r}: 'bits' and 'array_size' "
+                        f"are mutually exclusive"
+                    )
+
                 if bits is not None:
                     if ctype not in _INT_CTYPES:
                         raise ValueError(
                             f"message {mname!r} field {fname!r}: 'bits' is only valid on integer "
                             f"types, not {idl_type!r} ({ctype})"
                         )
-                    if not (1 <= int(bits) <= 64):
+                    width = _INT_WIDTH[ctype]
+                    if not (1 <= int(bits) <= width):
                         raise ValueError(
-                            f"message {mname!r} field {fname!r}: 'bits' must be between 1 and 64, got {bits}"
+                            f"message {mname!r} field {fname!r}: 'bits' must be between 1 and "
+                            f"{width} for {idl_type!r}, got {bits}"
                         )
 
-                array_size = f.get("array_size")
                 if array_size is not None and int(array_size) < 1:
                     raise ValueError(
                         f"message {mname!r} field {fname!r}: 'array_size' must be >= 1, got {array_size}"
@@ -125,6 +143,13 @@ class YamlSpecLoader(SpecLoader):
                     array_size=array_size,
                     comment=f.get("comment", "")
                 ))
+
+            wire = sum(field_wire_size(ff) for ff in fields)
+            if wire > _MAX_PAYLOAD_BYTES:
+                raise ValueError(
+                    f"message {mname!r}: payload wire size {wire} bytes exceeds the "
+                    f"{_MAX_PAYLOAD_BYTES}-byte limit (header payload_len is uint16)"
+                )
             messages.append(Message(
                 name=m["name"],
                 opcode=op,
