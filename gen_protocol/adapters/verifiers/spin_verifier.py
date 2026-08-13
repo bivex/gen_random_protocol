@@ -115,7 +115,7 @@ class SpinVerifier(ModelVerifier):
         print(f"[gen_protocol]  wrote {report_file}")
 
         for f in [cwd / "pan.c", cwd / "pan.h", cwd / "pan.b", cwd / "pan.m", cwd / "pan.t",
-                  cwd / "pan_safety", cwd / "pan_live", cwd / "_spin_nvr.tmp"]:
+                  cwd / "pan.p", cwd / "pan_safety", cwd / "pan_live", cwd / "_spin_nvr.tmp"]:
             try:
                 if f.exists(): f.unlink()
             except OSError:
