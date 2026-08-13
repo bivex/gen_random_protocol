@@ -51,6 +51,8 @@ It produces cryptographically seeded C binary protocols, multi-node **MultiChain
 | **IEEE-754 Safety** | UB-free `float` and `double` wire encoding using `memcpy` bit re-interpretation + byte swapping. |
 | **Bitfields & Arrays** | Portable integer storage with auto-generated bitmask getters/setters (`GET_*`, `SET_*`) and fixed array support. |
 | **Frame CRC Integrity** | CRC-32/ISO-HDLC computed over `header(crc=0) || payload`. Internal double-swap protection built into `frame_crc()`. |
+| **SemVer Version Check** | `hdr_validate()` accepts any frame on a matching **major** version (minor/patch are forward-compatible). |
+| **Anti-Replay Window** | Opt-in IPsec-style sliding bitmap window (`<proto>_replay_check()`, width 64, wraparound-safe) rejects replayed/stale frames per session. |
 | **Validation Error Enum** | Explicit header validation error codes (`MY_PROTO_HDR_ERR_*`) returnable by `hdr_validate()`. |
 | **Markdown Documentation** | Generates human-readable RFC-style specifications (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`). |
 
