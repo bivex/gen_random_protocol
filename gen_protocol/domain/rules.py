@@ -48,7 +48,7 @@ def calculate_magic(name: str, seed: str) -> int:
 def field_wire_size(f: Field) -> int:
     """Calculate wire byte size for a Field."""
     sizes = {
-        "uint8_t": 1, "int8_t": 1, "bool": 1,
+        "uint8_t": 1, "int8_t": 1,
         "uint16_t": 2, "int16_t": 2,
         "uint32_t": 4, "int32_t": 4, "float": 4,
         "uint64_t": 8, "int64_t": 8, "double": 8,

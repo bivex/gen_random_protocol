@@ -5,7 +5,6 @@ Adapter emitting JSON manifest files.
 import json
 from gen_protocol.domain.models import Protocol
 from gen_protocol.domain.rules import field_wire_size, msg_wire_size
-from gen_protocol.domain.types import C_TYPE_TO_IDL
 from gen_protocol.ports.emitter import CodeEmitter
 
 

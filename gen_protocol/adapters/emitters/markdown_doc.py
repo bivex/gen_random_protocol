@@ -8,6 +8,11 @@ from gen_protocol.domain.rules import field_wire_size, msg_wire_size
 from gen_protocol.ports.emitter import CodeEmitter
 
 
+def _md_cell(s) -> str:
+    """Escape free text so it cannot break a markdown table cell."""
+    return str(s).replace("\\", "\\\\").replace("|", "\\|")
+
+
 class MarkdownDocEmitter(CodeEmitter):
     def emit(self) -> str:
         p = self.p
@@ -67,16 +72,16 @@ class MarkdownDocEmitter(CodeEmitter):
             f"|---|---|---|---|---|",
         ]
         for m in p.messages:
-            lines.append(f"| `0x{m.opcode:04X}` | `{m.name}` | `{m.direction}` | `{msg_wire_size(m)} B` | {m.description} |")
+            lines.append(f"| `0x{m.opcode:04X}` | `{m.name}` | `{m.direction}` | `{msg_wire_size(m)} B` | {_md_cell(m.description)} |")
 
         lines += [
             f"",
             f"## 4. Message Payloads",
             f"",
         ]
-        for m in p.messages:
+        for idx, m in enumerate(p.messages):
             lines += [
-                f"### 4.{p.messages.index(m)+1} `{m.name}` (Opcode: `0x{m.opcode:04X}`)",
+                f"### 4.{idx + 1} `{m.name}` (Opcode: `0x{m.opcode:04X}`)",
                 f"",
                 f"**Direction:** `{m.direction}`  ",
                 f"**Total Payload Size:** `{msg_wire_size(m)}` bytes  ",
@@ -87,7 +92,7 @@ class MarkdownDocEmitter(CodeEmitter):
             ]
             for f in m.fields:
                 extra = f"{f.bits} bits" if f.bits else (f"[{f.array_size}]" if f.array_size else "—")
-                lines.append(f"| `{f.name}` | `{f.ctype}` | `{extra}` | `{field_wire_size(f)} B` | {f.comment} |")
+                lines.append(f"| `{f.name}` | `{f.ctype}` | `{extra}` | `{field_wire_size(f)} B` | {_md_cell(f.comment)} |")
             lines.append("")
 
         lines += [
