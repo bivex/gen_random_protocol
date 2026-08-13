@@ -5,6 +5,7 @@ Unit tests for gen_protocol domain generator and semantic rules.
 import unittest
 from random import Random
 
+from gen_protocol.adapters.emitters.c_source import CSourceEmitter
 from gen_protocol.domain.generator import ProtocolGenerator
 from gen_protocol.domain.types import C_TYPES, FIELD_SEMANTIC_RULES
 
@@ -60,6 +61,22 @@ class TestProtocolGeneratorSemantics(unittest.TestCase):
         for m1, m2 in zip(p1.messages, p2.messages):
             self.assertEqual(m1.name, m2.name)
             self.assertEqual(m1.opcode, m2.opcode)
+
+
+    def test_seq_validate_is_wraparound_safe(self):
+        """Anti-replay must use a wraparound-safe signed delta and a UINT32_MAX
+        init sentinel — not the naive `> last || last == 0` form (which accepted
+        an exact replay of sequence 0 and bricked the session on rollover)."""
+        proto = self.generator.generate()
+        src = CSourceEmitter(proto).emit()
+
+        start = src.index("_seq_validate(")
+        body = src[start:src.index("}", start) + 1]
+
+        self.assertIn("int32_t", body)                 # signed-delta comparison
+        self.assertIn("0xFFFFFFFF", src)               # documented init sentinel
+        self.assertNotIn("*last_seq == 0U", body)      # buggy init special-case gone
+        self.assertNotIn("incoming_seq > *last_seq", body)  # naive non-wrap check gone
 
 
 if __name__ == "__main__":

@@ -230,6 +230,8 @@ class CHeaderEmitter(CodeEmitter):
             "",
             f"int  {n}_hdr_validate(const {p.header_struct_name} *hdr, "
             f"const void *payload, size_t payload_len);",
+            f"/* Opt-in anti-replay: init *last_seq = 0xFFFFFFFFu per session, then call after",
+            f" * each successful {n}_hdr_validate(). Wraparound-safe; rejects replays/stale frames. */",
             f"bool {n}_seq_validate(uint32_t incoming_seq, uint32_t *last_seq);",
             f"const char *{n}_opcode_str(uint16_t opcode);",
             "",
