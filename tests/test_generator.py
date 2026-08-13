@@ -63,20 +63,25 @@ class TestProtocolGeneratorSemantics(unittest.TestCase):
             self.assertEqual(m1.opcode, m2.opcode)
 
 
-    def test_seq_validate_is_wraparound_safe(self):
-        """Anti-replay must use a wraparound-safe signed delta and a UINT32_MAX
-        init sentinel — not the naive `> last || last == 0` form (which accepted
-        an exact replay of sequence 0 and bricked the session on rollover)."""
+    def test_replay_check_is_sliding_window(self):
+        """Anti-replay must be an IPsec-style sliding bitmap window: wraparound-safe
+        (signed delta) and tolerant of out-of-order delivery within the window — not
+        the naive strict-monotonic `> last` check (which bricked the session on uint32
+        rollover and rejected all out-of-order frames)."""
+        from gen_protocol.adapters.emitters.c_header import CHeaderEmitter
         proto = self.generator.generate()
-        src = CSourceEmitter(proto).emit()
+        c_src = CSourceEmitter(proto).emit()
+        h_src = CHeaderEmitter(proto).emit()
 
-        start = src.index("_seq_validate(")
-        body = src[start:src.index("}", start) + 1]
-
-        self.assertIn("int32_t", body)                 # signed-delta comparison
-        self.assertIn("0xFFFFFFFF", src)               # documented init sentinel
-        self.assertNotIn("*last_seq == 0U", body)      # buggy init special-case gone
-        self.assertNotIn("incoming_seq > *last_seq", body)  # naive non-wrap check gone
+        self.assertIn("_replay_check(", c_src)         # sliding-window function emitted
+        self.assertIn("_replay_state_t", h_src)        # state struct emitted
+        self.assertIn("REPLAY_WINDOW", h_src)          # window-width macro emitted
+        self.assertIn("st->window", c_src)             # bitmap state used
+        self.assertIn("int32_t delta", c_src)          # wraparound-safe signed delta
+        self.assertIn("1ULL << back", c_src)           # per-sequence bit test
+        # old naive/strict-monotonic forms must be gone
+        self.assertNotIn("_seq_validate", c_src + h_src)
+        self.assertNotIn("incoming_seq > *last_seq", c_src)
 
 
 if __name__ == "__main__":
