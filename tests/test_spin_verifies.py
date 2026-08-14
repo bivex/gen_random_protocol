@@ -37,6 +37,45 @@ class TestSpinVerifies(unittest.TestCase):
             f"SPIN verification did not pass: {result}",
         )
 
+    def test_high_opcodes_pass_spin(self):
+        """Regression: IDL opcodes above 0x00FE (16-bit wire values) must
+        model-check cleanly. The model previously stored the opcode in a
+        Promela `byte` with a hard-coded OPCODE_MAX=254, so any legal
+        0x0100..0xFFFE opcode truncated to 0 and failed every assertion."""
+        from gen_protocol.adapters.emitters.promela import PromelaEmitter
+        from gen_protocol.adapters.idl.yaml_loader import YamlSpecLoader
+        from gen_protocol.adapters.verifiers.spin_verifier import SpinVerifier
+
+        tmp = Path(tempfile.mkdtemp())
+        spec = tmp / "spec.yaml"
+        spec.write_text(
+            "protocol:\n"
+            "  name: HIOP\n"
+            "  version: 1.0.0\n"
+            "  pattern: rpc\n"
+            "messages:\n"
+            "  - name: CALL\n"
+            "    opcode: 0x0100\n"
+            "    direction: C->S\n"
+            "    fields: [{name: method_id, type: u16}]\n"
+            "  - name: RESULT\n"
+            "    opcode: 0x0101\n"
+            "    direction: S->C\n"
+            "    fields: [{name: status, type: u8}]\n"
+        )
+        proto = YamlSpecLoader().load(spec)
+
+        pml_text = PromelaEmitter(proto).emit()
+        self.assertIn("#define OPCODE_MAX 257", pml_text)  # derived, not hard-coded 254
+
+        pml = tmp / "model.pml"
+        pml.write_text(pml_text)
+        result = SpinVerifier().verify(pml)
+        self.assertTrue(
+            result.get("passed") is True,
+            f"SPIN verification did not pass for 16-bit opcodes: {result}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,10 +60,14 @@ class PromelaEmitter(CodeEmitter):
         ]
         for m in self.p.messages:
             lines.append(f"#define OP_{self._sym(m):<50} {m.opcode}")
+        # Opcode range is derived from the protocol itself: the IDL allows
+        # 16-bit opcodes (0x0001..0xFFFE), which do not fit a Promela byte.
+        opcode_min = min(m.opcode for m in self.p.messages)
+        opcode_max = max(m.opcode for m in self.p.messages)
         lines += [
             f"",
-            f"#define OPCODE_MIN 1",
-            f"#define OPCODE_MAX 254",
+            f"#define OPCODE_MIN {opcode_min}",
+            f"#define OPCODE_MAX {opcode_max}",
         ]
         return "\n".join(lines)
 
@@ -91,7 +95,7 @@ class PromelaEmitter(CodeEmitter):
             "bool session_active  = false;",
             "bool error_detected  = false;",
             "bool replay_accepted = false;  /* set to true if an invalid replayed/tampered frame is accepted */",
-            "byte last_opcode     = 0;",
+            "int  last_opcode     = 0;  /* int, not byte: 16-bit wire opcodes (0x0001..0xFFFE) */",
             "byte msg_in_flight   = 0;  /* count of unacknowledged messages */",
         ]
         if p.pattern == "reqrsp":
