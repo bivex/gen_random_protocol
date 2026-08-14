@@ -1,10 +1,7 @@
-"""
-Adapter loading Protocol from YAML or JSON IDL specifications.
-"""
-
+import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from gen_protocol.domain.models import Enum, Field, Message, Protocol
 from gen_protocol.domain.rules import (
@@ -25,6 +22,7 @@ _INT_WIDTH = {
     "uint32_t": 32, "int32_t": 32,
     "uint64_t": 64, "int64_t": 64,
 }
+# Standard 16-bit opcode range supported by the wire format (0x0000 and 0xFFFF reserved)
 _OPCODE_MIN = 0x0001
 _OPCODE_MAX = 0xFFFE
 # Header payload_len is a uint16 (2 octets) per the wire format.
@@ -43,7 +41,7 @@ def _parse_opcode(raw) -> int:
 
 
 class YamlSpecLoader(SpecLoader):
-    def load(self, path: Path) -> Protocol:
+    def load(self, path: Path, *, seed: Optional[str] = None) -> Protocol:
         if not path.exists():
             raise FileNotFoundError(f"Spec file not found: {path}")
 
@@ -68,8 +66,24 @@ class YamlSpecLoader(SpecLoader):
         v_min = int(ver_parts[1]) if len(ver_parts) > 1 else 0
         v_pat = int(ver_parts[2]) if len(ver_parts) > 2 else 0
 
-        seed = make_seed()
-        magic = calculate_magic(name, seed)
+        # Deterministic seed resolution: CLI/argument override -> YAML metadata -> SHA-256(file content)
+        if seed:
+            resolved_seed = seed.strip().lower()
+        elif "seed" in p_info and p_info["seed"]:
+            resolved_seed = str(p_info["seed"]).strip().lower()
+        else:
+            resolved_seed = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:32]
+
+        # Magic constant resolution: YAML explicit magic -> calculate_magic(name, seed)
+        if "magic" in p_info and p_info["magic"] is not None:
+            raw_magic = str(p_info["magic"]).strip()
+            if raw_magic.lower().startswith("0x"):
+                magic = int(raw_magic, 16)
+            else:
+                magic = int(raw_magic)
+        else:
+            magic = calculate_magic(name, resolved_seed)
+
         endian = p_info.get("endian", "big")
         pattern = p_info.get("pattern", "rpc")
 
@@ -168,7 +182,7 @@ class YamlSpecLoader(SpecLoader):
             version_patch=v_pat,
             magic=magic,
             pattern=pattern,
-            seed=seed,
+            seed=resolved_seed,
             messages=messages,
             enums=enums,
             header_struct_name=f"{name.lower()}_hdr_t",

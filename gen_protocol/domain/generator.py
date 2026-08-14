@@ -35,10 +35,13 @@ class ProtocolGenerator:
         used.add(name)
         return name
 
-    def _free_opcode(self, proto: Protocol, prefer: tuple = ()) -> int:
-        """Return an opcode in 0x01..0xFE not yet used by proto.
+    RANDOM_OPCODE_MIN: int = 0x0001
+    RANDOM_OPCODE_MAX: int = 0x00FE
 
-        Tries the preferred values first, then scans the full valid range.
+    def _free_opcode(self, proto: Protocol, prefer: tuple = ()) -> int:
+        """Return an opcode in 0x0001..0x00FE not yet used by proto.
+
+        Tries the preferred values first, then scans the random generator sampling range.
         Used for injected messages (e.g. cross-chain bridges) that must not
         collide with randomly assigned message opcodes.
         """
@@ -46,7 +49,7 @@ class ProtocolGenerator:
         for op in prefer:
             if op not in used:
                 return op
-        for op in range(0x01, 0x00FF):  # 0x01..0xFE inclusive
+        for op in range(self.RANDOM_OPCODE_MIN, self.RANDOM_OPCODE_MAX + 1):
             if op not in used:
                 return op
         raise ValueError(f"{proto.name}: no free opcode available for injected message")

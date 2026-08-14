@@ -89,6 +89,7 @@ def main(argv=None) -> int:
         elif args.spec:
             service.compile_from_spec(
                 Path(args.spec),
+                seed_hex=args.seed,
                 run_spin=args.spin,
                 no_verify=args.no_verify,
                 no_impl=args.no_impl,

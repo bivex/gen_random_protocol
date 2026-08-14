@@ -18,7 +18,7 @@ class Field:
 @dataclass
 class Message:
     name: str
-    opcode: int                       # 16-bit opcode (0x0001 - 0xFFFE)
+    opcode: int                       # 16-bit wire opcode (0x0001 - 0xFFFE; random generator samples 0x0001 - 0x00FE)
     fields: List[Field]
     direction: str                    # "C->S" | "S->C" | "BIDI"
     description: str

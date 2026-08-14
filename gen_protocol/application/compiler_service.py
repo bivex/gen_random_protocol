@@ -28,6 +28,7 @@ class ProtocolCompilerService:
         self.out_dir = out_dir
 
     def compile_from_spec(self, spec_path: Path, *,
+                          seed_hex: Optional[str] = None,
                           run_spin: bool = False,
                           no_verify: bool = False,
                           no_impl: bool = False,
@@ -36,7 +37,7 @@ class ProtocolCompilerService:
                           json_manifest: bool = False,
                           verbose: bool = False) -> Protocol:
         loader = YamlSpecLoader()
-        proto = loader.load(spec_path)
+        proto = loader.load(spec_path, seed=seed_hex)
         return self._emit_and_verify(
             proto,
             run_spin=run_spin,

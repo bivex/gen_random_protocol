@@ -11,7 +11,7 @@ class SpecLoader(ABC):
     """Abstract port interface for loading Protocol from spec file."""
 
     @abstractmethod
-    def load(self, path: Path) -> Protocol:
+    def load(self, path: Path, *, seed: Optional[str] = None) -> Protocol:
         pass
 
 
