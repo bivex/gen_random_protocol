@@ -278,6 +278,9 @@ class ProtocolGenerator:
 
             bridge_msg_name = f"{src_p.name}_MSG_BRIDGE_TO_{dst_p.name}"
             bridge_op = self._free_opcode(src_p, prefer=(0x00FE, 0x00FD, 0x00FC, 0x00FB))
+            tunnel_capacity = max(1024, ((dst_p.max_payload_size + 22 + 63) // 64) * 64)
+            src_p.max_payload_size = max(src_p.max_payload_size, tunnel_capacity + 64)
+
             bridge_msg = Message(
                 name=bridge_msg_name,
                 opcode=bridge_op,
@@ -285,10 +288,10 @@ class ProtocolGenerator:
                     Field(name="target_magic", ctype="uint32_t", comment=f"Target chain magic constant (0x{dst_p.magic:08X})"),
                     Field(name="target_opcode", ctype="uint16_t", comment="Target chain message opcode"),
                     Field(name="tunnel_seq", ctype="uint32_t", comment="Cross-chain tunnel sequence counter"),
-                    Field(name="tunnel_payload", ctype="uint8_t", array_size=128, comment="Encapsulated cross-chain payload"),
+                    Field(name="tunnel_payload", ctype="uint8_t", array_size=tunnel_capacity, comment="Encapsulated cross-chain wire frame"),
                 ],
                 direction="C->S",
-                description=f"Tunnel bridge message encapsulating {dst_p.name} payload"
+                description=f"Tunnel bridge message encapsulating full {dst_p.name} wire frame"
             )
             src_p.messages.append(bridge_msg)
 
