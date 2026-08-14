@@ -5,9 +5,10 @@ from typing import Any, Dict, Optional
 
 from gen_protocol.domain.models import Enum, Field, Message, Protocol
 from gen_protocol.domain.rules import (
-    calculate_magic, field_wire_size, make_seed, msg_wire_size, sanitize_proto_name
+    calculate_magic, field_wire_size, make_seed, msg_wire_size, sanitize_comment,
+    sanitize_proto_name, validate_c_identifier
 )
-from gen_protocol.domain.types import IDL_TO_C_TYPE
+from gen_protocol.domain.types import IDL_TO_C_TYPE, PATTERNS
 from gen_protocol.ports.idl import SpecLoader
 
 
@@ -84,18 +85,32 @@ class YamlSpecLoader(SpecLoader):
         else:
             magic = calculate_magic(name, resolved_seed)
 
-        endian = p_info.get("endian", "big")
-        pattern = p_info.get("pattern", "rpc")
+        endian = str(p_info.get("endian", "big")).lower().strip()
+        if endian not in ("little", "big"):
+            raise ValueError(f"protocol 'endian' must be 'little' or 'big', got {endian!r}")
+
+        pattern = str(p_info.get("pattern", "rpc")).lower().strip()
+        if pattern not in PATTERNS:
+            raise ValueError(f"protocol 'pattern' must be one of {PATTERNS}, got {pattern!r}")
 
         enums = []
         for e in data.get("enums", []):
-            members = [(m["name"], int(m["value"])) for m in e.get("members", [])]
-            enums.append(Enum(name=e["name"], members=members))
+            ename = validate_c_identifier(e["name"], "enum name")
+            members = []
+            for m in e.get("members", []):
+                m_name = validate_c_identifier(m["name"], "enum member name")
+                members.append((m_name, int(m["value"])))
+            enums.append(Enum(name=ename, members=members))
 
         messages = []
         seen_ops: set = set()
+        seen_msg_names: set = set()
         for m in data.get("messages", []):
-            mname = m.get("name", "<unnamed>")
+            mname = validate_c_identifier(m.get("name", "<unnamed>"), "message name")
+            if mname in seen_msg_names:
+                raise ValueError(f"duplicate message name {mname!r}")
+            seen_msg_names.add(mname)
+
             op = _parse_opcode(m.get("opcode", "0x0001"))
             if not (_OPCODE_MIN <= op <= _OPCODE_MAX):
                 raise ValueError(
@@ -109,9 +124,7 @@ class YamlSpecLoader(SpecLoader):
             fields = []
             seen_field_names: set = set()
             for f in m.get("fields", []):
-                fname = f.get("name")
-                if not fname:
-                    raise ValueError(f"message {mname!r}: field is missing a 'name'")
+                fname = validate_c_identifier(f.get("name"), "field name")
                 if fname in seen_field_names:
                     raise ValueError(f"message {mname!r}: duplicate field name {fname!r}")
                 seen_field_names.add(fname)
@@ -155,7 +168,7 @@ class YamlSpecLoader(SpecLoader):
                     ctype=ctype,
                     bits=bits,
                     array_size=array_size,
-                    comment=f.get("comment", "")
+                    comment=sanitize_comment(f.get("comment", ""))
                 ))
 
             wire = sum(field_wire_size(ff) for ff in fields)
@@ -164,12 +177,17 @@ class YamlSpecLoader(SpecLoader):
                     f"message {mname!r}: payload wire size {wire} bytes exceeds the "
                     f"{_MAX_PAYLOAD_BYTES}-byte limit (header payload_len is uint16)"
                 )
+
+            direction = str(m.get("direction", "C->S")).upper().strip()
+            if direction not in ("C->S", "S->C", "BIDI"):
+                raise ValueError(f"message {mname!r}: invalid direction {direction!r} (must be C->S, S->C, or BIDI)")
+
             messages.append(Message(
-                name=m["name"],
+                name=mname,
                 opcode=op,
                 fields=fields,
-                direction=m.get("direction", "C->S"),
-                description=m.get("description", "")
+                direction=direction,
+                description=sanitize_comment(m.get("description", ""))
             ))
 
         max_pay = max((msg_wire_size(m) for m in messages), default=1024)

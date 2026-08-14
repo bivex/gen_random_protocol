@@ -1,5 +1,5 @@
 """
-Unit tests for YamlSpecLoader: determinism, seed reproducibility, custom magic, and validations.
+Unit tests for YamlSpecLoader: determinism, seed reproducibility, custom magic, validations, and code-injection prevention.
 """
 
 import tempfile
@@ -127,7 +127,90 @@ messages:
         f.write_text(yaml_missing_name)
         with self.assertRaises(ValueError) as ctx:
             self.loader.load(f)
-        self.assertIn("missing a 'name'", str(ctx.exception))
+        self.assertIn("must match regex", str(ctx.exception))
+
+    def test_code_injection_prevention(self):
+        # 1. Malicious field name with C statement injection
+        yaml_inj_field = """
+protocol:
+  name: INJ_PROTO
+messages:
+  - name: MSG
+    opcode: 0x0001
+    fields:
+      - { name: "x; system(\\"rm -rf /\\")", type: u32 }
+"""
+        f1 = self.tmp_dir / "inj_field.yaml"
+        f1.write_text(yaml_inj_field)
+        with self.assertRaises(ValueError) as ctx:
+            self.loader.load(f1)
+        self.assertIn("Invalid C field name", str(ctx.exception))
+
+        # 2. Malicious message name with newline and preprocessor injection
+        yaml_inj_msg = """
+protocol:
+  name: INJ_PROTO
+messages:
+  - name: "MSG\\n#include <evil.h>"
+    opcode: 0x0001
+"""
+        f2 = self.tmp_dir / "inj_msg.yaml"
+        f2.write_text(yaml_inj_msg)
+        with self.assertRaises(ValueError) as ctx:
+            self.loader.load(f2)
+        self.assertIn("Invalid C message name", str(ctx.exception))
+
+        # 3. Reserved keyword as field name
+        yaml_res_field = """
+protocol:
+  name: INJ_PROTO
+messages:
+  - name: MSG
+    opcode: 0x0001
+    fields:
+      - { name: "struct", type: u32 }
+"""
+        f3 = self.tmp_dir / "res_field.yaml"
+        f3.write_text(yaml_res_field)
+        with self.assertRaises(ValueError) as ctx:
+            self.loader.load(f3)
+        self.assertIn("cannot be a C reserved keyword", str(ctx.exception))
+
+        # 4. Malicious enum name / member injection
+        yaml_inj_enum = """
+protocol:
+  name: INJ_PROTO
+enums:
+  - name: "EVIL_ENUM; int backdoor()"
+    members:
+      - { name: "OK", value: 0 }
+messages:
+  - name: MSG
+    opcode: 0x0001
+"""
+        f4 = self.tmp_dir / "inj_enum.yaml"
+        f4.write_text(yaml_inj_enum)
+        with self.assertRaises(ValueError) as ctx:
+            self.loader.load(f4)
+        self.assertIn("Invalid C enum name", str(ctx.exception))
+
+        # 5. Comment sanitization check (strips C comment breakouts)
+        yaml_comment = """
+protocol:
+  name: COMMENT_PROTO
+messages:
+  - name: MSG
+    opcode: 0x0001
+    description: "Legal description /* break-out */ int backdoor;"
+    fields:
+      - { name: valid_field, type: u32, comment: "Field comment */ inject;" }
+"""
+        f5 = self.tmp_dir / "comment.yaml"
+        f5.write_text(yaml_comment)
+        proto = self.loader.load(f5)
+        self.assertNotIn("/*", proto.messages[0].description)
+        self.assertNotIn("*/", proto.messages[0].description)
+        self.assertNotIn("*/", proto.messages[0].fields[0].comment)
 
 
 if __name__ == "__main__":

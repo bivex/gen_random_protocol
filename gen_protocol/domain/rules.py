@@ -18,15 +18,39 @@ from gen_protocol.domain.models import Field, Message, Protocol
 from gen_protocol.domain.types import _C_RESERVED
 
 
+_C_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def validate_c_identifier(name: str, context: str = "identifier") -> str:
+    """Validate that name is a valid, non-reserved C identifier."""
+    if not isinstance(name, str) or not _C_IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"Invalid C {context} {name!r}: must match regex ^[A-Za-z_][A-Za-z0-9_]{{0,63}}$"
+        )
+    if name.lower() in _C_RESERVED or name.startswith("__"):
+        raise ValueError(
+            f"Invalid C {context} {name!r}: cannot be a C reserved keyword or start with '__'"
+        )
+    return name
+
+
+def sanitize_comment(comment: Any) -> str:
+    """Sanitize comment to prevent C comment break-out or arbitrary injections."""
+    if not comment:
+        return ""
+    s = str(comment).replace("/*", "").replace("*/", "").replace("\n", " ").replace("\r", " ").strip()
+    return "".join(c for c in s if c.isprintable())
+
+
 def sanitize_proto_name(raw: str) -> str:
     """Produce a valid C identifier prefix from arbitrary input."""
-    s = re.sub(r'[^A-Za-z0-9_]', '_', raw)
+    s = re.sub(r'[^A-Za-z0-9_]', '_', str(raw))
     s = re.sub(r'^[^A-Za-z]+', '', s)
     s = re.sub(r'_+', '_', s).strip('_')
     s = s.upper() or 'PROTO'
     if s.lower() in _C_RESERVED or s.startswith('_') or '__' in s:
         s = 'PROTO_' + s
-    return s
+    return validate_c_identifier(s, "protocol name")
 
 
 def make_seed() -> str:

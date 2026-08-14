@@ -7,13 +7,13 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from gen_protocol.ports.verifier import ModelVerifier
 
 
 class SpinVerifier(ModelVerifier):
     def verify(self, pml_file: Path) -> Dict[str, Any]:
-        """Runs SPIN safety (DSAFETY) and liveness (-a) model checking."""
+        """Runs SPIN safety (DSAFETY) and individual LTL claim verification (-a -N <claim>)."""
         if not shutil.which("spin"):
             print("[spin]  warning: 'spin' executable not found in PATH; skipping model checking.")
             return {"error": "spin_not_found"}
@@ -24,6 +24,10 @@ class SpinVerifier(ModelVerifier):
 
         cwd = pml_file.parent.resolve()
         pml_name = pml_file.name
+        pml_text = pml_file.read_text(encoding="utf-8")
+
+        # Parse all LTL properties defined in the Promela model
+        ltl_claims: List[str] = re.findall(r"^\s*ltl\s+([A-Za-z0-9_]+)\s*\{", pml_text, re.MULTILINE)
 
         def _run_cmd(cmd_args, desc):
             r = subprocess.run(cmd_args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -73,6 +77,7 @@ class SpinVerifier(ModelVerifier):
                 "raw": text,
             }
 
+        # 1. Base Safety Model Checking (Assertions + Deadlock freedom)
         print("[spin]  Compiling safety verifier (DSAFETY) ...")
         rc, out = _run_cmd(["gcc", "-DSAFETY", "-O2", "-o", "pan_safety", "pan.c"], "gcc DSAFETY")
         if rc != 0:
@@ -85,29 +90,48 @@ class SpinVerifier(ModelVerifier):
         safety_data["exit_code"] = rc_s
         s_pass = (rc_s == 0 and safety_data["errors"] == 0)
         s_symbol = "✓ PASS" if s_pass else "✗ FAIL"
-        print(f"[spin]  Safety  : {s_symbol}  (exit_code={rc_s}, errors={safety_data['errors']}, states={safety_data['states']}, depth={safety_data['depth']})")
+        print(f"[spin]  Safety       : {s_symbol}  (exit_code={rc_s}, errors={safety_data['errors']}, states={safety_data['states']}, depth={safety_data['depth']})")
 
-        print("[spin]  Compiling liveness verifier ...")
+        # 2. Liveness and LTL Claim Verification
+        print("[spin]  Compiling liveness & LTL claim verifier ...")
         rc, out = _run_cmd(["gcc", "-O2", "-o", "pan_live", "pan.c"], "gcc pan_live")
         if rc != 0:
             print(f"[spin]  gcc pan_live failed:\n{out}")
             return {"error": "gcc_live_failed", "raw": out}
 
-        print("[spin]  Running liveness check (-a, search depth=500000) ...")
-        rc_l, out_l = _run_cmd(["./pan_live", "-a", "-m500000"], "pan_live")
-        live_data = _parse_pan_output(out_l)
-        live_data["exit_code"] = rc_l
-        l_pass = (rc_l == 0 and live_data["errors"] == 0)
-        l_symbol = "✓ PASS" if l_pass else "✗ FAIL"
-        print(f"[spin]  Liveness: {l_symbol}  (exit_code={rc_l}, errors={live_data['errors']}, states={live_data['states']}, depth={live_data['depth']})")
+        ltl_results: Dict[str, Any] = {}
+        all_ltl_pass = True
 
-        overall_pass = s_pass and l_pass
+        if ltl_claims:
+            for claim in ltl_claims:
+                rc_c, out_c = _run_cmd(["./pan_live", "-a", f"-N{claim}", "-m500000"], f"pan_live -N{claim}")
+                claim_data = _parse_pan_output(out_c)
+                claim_data["exit_code"] = rc_c
+                c_pass = (rc_c == 0 and claim_data["errors"] == 0)
+                claim_data["passed"] = c_pass
+                ltl_results[claim] = claim_data
+                if not c_pass:
+                    all_ltl_pass = False
+                c_sym = "✓ PASS" if c_pass else "✗ FAIL"
+                print(f"[spin]  LTL Claim [{claim}]: {c_sym}  (exit_code={rc_c}, errors={claim_data['errors']}, states={claim_data['states']}, depth={claim_data['depth']})")
+        else:
+            # Fallback to model-level acceptance cycles check if no explicit LTL formulas
+            print("[spin]  Running liveness check (-a, search depth=500000) ...")
+            rc_l, out_l = _run_cmd(["./pan_live", "-a", "-m500000"], "pan_live")
+            live_data = _parse_pan_output(out_l)
+            live_data["exit_code"] = rc_l
+            all_ltl_pass = (rc_l == 0 and live_data["errors"] == 0)
+            ltl_results["_general_liveness"] = live_data
+            l_sym = "✓ PASS" if all_ltl_pass else "✗ FAIL"
+            print(f"[spin]  Liveness     : {l_sym}  (exit_code={rc_l}, errors={live_data['errors']}, states={live_data['states']}, depth={live_data['depth']})")
+
+        overall_pass = s_pass and all_ltl_pass
         report_data = {
             "pml": str(pml_file),
             "safety": safety_data,
-            "liveness": live_data,
+            "ltl_claims": ltl_results,
             "passed": overall_pass,
-            "summary": "PASS — no errors found" if overall_pass else "FAIL — verification errors detected",
+            "summary": "PASS — all safety and LTL claims verified" if overall_pass else "FAIL — verification errors detected",
         }
 
         report_file = pml_file.with_name(pml_file.stem + "_spin_report.json")
@@ -121,6 +145,6 @@ class SpinVerifier(ModelVerifier):
             except OSError:
                 pass
 
-        res_str = "✓ PASS — no errors found" if overall_pass else "✗ FAIL — errors found"
+        res_str = "✓ PASS — all invariants and LTL claims hold" if overall_pass else "✗ FAIL — errors found"
         print(f"\n[spin]  Overall result: {res_str}\n")
         return report_data
