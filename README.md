@@ -45,14 +45,16 @@ It produces cryptographically seeded C binary protocols, multi-node **MultiChain
 |---------|------------------------------------------|
 | **MultiChain Protocol Suites** | Generate $N$ interconnected protocols (`-c N` / `--multichain N`) with cross-chain bridge frame tunneling (`*_MSG_BRIDGE_TO_*`). |
 | **22-Byte Frame Header** | Fixed 22-byte canonical wire header (`magic`, `version`, `opcode`, `session_id`, `sequence`, `payload_len`, `crc32`). |
+| **HMAC-SHA256 Authentication** | Embedded zero-dependency FIPS 180-4 / RFC 2104 MAC authentication (`--auth hmac-sha256`) with constant-time verification. |
+| **libFuzzer Harness & Corpus** | Standalone fuzz target generation (`--fuzz`) with automated seed corpus synthesis for continuous ASan/UBSan fuzzing. |
 | **Declarative IDL** | Import and compile custom protocol definitions from **YAML** (`protocol.yaml`) or **JSON** schemas via `--spec`. |
-| **Formal Verification** | Auto-generates **Promela SPIN (`.pml`)** models and executes **Bounded Model Checking (BMC)** with 100% state reachability. |
+| **Formal Verification** | Auto-generates **Promela SPIN (`.pml`)** models and executes **Bounded Model Checking (BMC)** with Dolev-Yao adversary verification. |
 | **Portable Byte-Swapping** | Zero-dependency byte swapping (`TO_WIRE16/32/64`, `FROM_WIRE16/32/64`) for `little-endian` and `big-endian` wire order. |
 | **IEEE-754 Safety** | UB-free `float` and `double` wire encoding using `memcpy` bit re-interpretation + byte swapping. |
 | **Bitfields & Arrays** | Portable integer storage with auto-generated bitmask getters/setters (`GET_*`, `SET_*`) and fixed array support. |
 | **Frame CRC Integrity** | CRC-32/ISO-HDLC computed over `header(crc=0) || payload`. Internal double-swap protection built into `frame_crc()`. |
-| **SemVer Version Check** | `hdr_validate()` accepts any frame on a matching **major** version (minor/patch are forward-compatible). |
-| **Anti-Replay Window** | Opt-in IPsec-style sliding bitmap window (`<proto>_replay_check()`, width 64, wraparound-safe) rejects replayed/stale frames per session. |
+| **Schema Length Validation** | `<proto>_expected_payload_len()` prevents truncated payload framing attacks (`HDR_ERR_LEN_SCHEMA`). |
+| **Multi-Session Replay Table** | Built-in `<proto>_replay_table_t` with LRU eviction and IPsec-style sliding bitmap window protects against replay DoS. |
 | **Validation Error Enum** | Explicit header validation error codes (`MY_PROTO_HDR_ERR_*`) returnable by `hdr_validate()`. |
 | **Markdown Documentation** | Generates human-readable RFC-style specifications (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`). |
 
@@ -67,10 +69,10 @@ It produces cryptographically seeded C binary protocols, multi-node **MultiChain
 Each protocol link $L_i$ in a MultiChain suite includes an encapsulated tunnel bridge frame:
 ```c
 typedef struct PROTO_PACKED {
-    uint32_t     target_magic;        /* Magic constant of destination protocol */
-    uint16_t     target_opcode;       /* Message opcode for target chain node */
-    uint32_t     tunnel_seq;          /* Cross-chain tunnel sequence counter */
-    uint8_t      tunnel_payload[128]; /* Encapsulated cross-chain data payload */
+    uint32_t     target_magic;         /* Magic constant of destination protocol */
+    uint16_t     target_opcode;        /* Message opcode for target chain node */
+    uint32_t     tunnel_seq;           /* Cross-chain tunnel sequence counter */
+    uint8_t      tunnel_payload[1024]; /* Dynamically sized to encapsulate full target wire frame */
 } chain_link_i_msg_bridge_to_chain_link_i_plus_1_t;
 ```
 

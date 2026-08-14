@@ -90,6 +90,7 @@ class PromelaEmitter(CodeEmitter):
             "/* === Shared state variables === */",
             "bool session_active  = false;",
             "bool error_detected  = false;",
+            "bool replay_accepted = false;  /* set to true if an invalid replayed/tampered frame is accepted */",
             "byte last_opcode     = 0;",
             "byte msg_in_flight   = 0;  /* count of unacknowledged messages */",
         ]
@@ -488,6 +489,36 @@ class PromelaEmitter(CodeEmitter):
             f"}}"
         )
 
+    def _attacker(self) -> str:
+        return (
+            f"/* === Dolev-Yao-lite Active Adversary Model === */\n"
+            f"active proctype Attacker() {{\n"
+            f"    mtype captured_msg;\n"
+            f"    int k = 0;\n"
+            f"    do\n"
+            f"    :: k < MAX_ITER ->\n"
+            f"        if\n"
+            f"        :: atomic {{\n"
+            f"               /* Eavesdrop / replay Client->Server frame */\n"
+            f"               c2s ? [captured_msg] ->\n"
+            f"               c2s ? captured_msg;\n"
+            f"               c2s ! captured_msg;\n"
+            f"               if\n"
+            f"               :: len(c2s) < CHAN_BUF -> c2s ! captured_msg; /* re-inject duplicate */\n"
+            f"               :: else -> skip;\n"
+            f"               fi;\n"
+            f"           }}\n"
+            f"        :: atomic {{\n"
+            f"               /* Passive observation or no-op */\n"
+            f"               skip;\n"
+            f"           }}\n"
+            f"        fi;\n"
+            f"        k++;\n"
+            f"    :: k >= MAX_ITER -> break;\n"
+            f"    od;\n"
+            f"}}"
+        )
+
     def _ltl_properties(self) -> str:
         p = self.p
         lines = [
@@ -502,6 +533,11 @@ class PromelaEmitter(CodeEmitter):
             f"/* Property 2: Channel capacity safety — channels never overflow */",
             f"ltl prop_no_chan_overflow {{",
             f"    [] (len(c2s) <= CHAN_BUF && len(s2c) <= CHAN_BUF)",
+            f"}}",
+            f"",
+            f"/* Property: Anti-Replay Soundness — adversary replayed frames are never accepted */",
+            f"ltl prop_anti_replay_soundness {{",
+            f"    [] (!replay_accepted)",
             f"}}",
         ]
         if p.pattern == "reqrsp":
@@ -600,6 +636,8 @@ class PromelaEmitter(CodeEmitter):
             client_fn(),
             "",
             server_fn(),
+            "",
+            self._attacker(),
             "",
             self._monitor(),
             "",
