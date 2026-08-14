@@ -11,6 +11,7 @@ from gen_protocol.domain.models import MultiChainSuite, Protocol
 from gen_protocol.domain.rules import log_seed, make_seed
 from gen_protocol.adapters.emitters.c_header import CHeaderEmitter
 from gen_protocol.adapters.emitters.c_source import CSourceEmitter
+from gen_protocol.adapters.emitters.fuzz_harness import FuzzHarnessEmitter, generate_seed_corpus
 from gen_protocol.adapters.emitters.promela import PromelaEmitter
 from gen_protocol.adapters.emitters.markdown_doc import MarkdownDocEmitter
 from gen_protocol.adapters.emitters.json_manifest import JsonManifestEmitter
@@ -35,6 +36,7 @@ class ProtocolCompilerService:
                           doc: bool = False,
                           export_spec: bool = False,
                           json_manifest: bool = False,
+                          fuzz: bool = False,
                           verbose: bool = False) -> Protocol:
         loader = YamlSpecLoader()
         proto = loader.load(spec_path, seed=seed_hex)
@@ -46,6 +48,7 @@ class ProtocolCompilerService:
             doc=doc,
             export_spec=export_spec,
             json_manifest=json_manifest,
+            fuzz=fuzz,
             verbose=verbose
         )
 
@@ -55,12 +58,14 @@ class ProtocolCompilerService:
                         n_messages: Optional[int] = None,
                         max_fields: Optional[int] = None,
                         pattern: str = "auto",
+                        auth: Optional[str] = None,
                         run_spin: bool = False,
                         no_verify: bool = False,
                         no_impl: bool = False,
                         doc: bool = False,
                         export_spec: bool = False,
                         json_manifest: bool = False,
+                        fuzz: bool = False,
                         verbose: bool = False) -> Protocol:
         seed = seed_hex if seed_hex else make_seed()
         seed_bytes = bytes.fromhex(seed)
@@ -69,10 +74,11 @@ class ProtocolCompilerService:
 
         gen = ProtocolGenerator(rng, seed)
         proto = gen.generate(
-            name_hint=name_hint,
+            name=name_hint,
             n_messages=n_messages,
             max_fields=max_fields,
-            pattern=pattern
+            pattern=pattern if pattern != "auto" else None,
+            auth=auth if auth != "none" else None,
         )
 
         log_seed(seed, proto.name)
@@ -86,6 +92,7 @@ class ProtocolCompilerService:
             doc=doc,
             export_spec=export_spec,
             json_manifest=json_manifest,
+            fuzz=fuzz,
             verbose=verbose
         )
 
@@ -95,12 +102,14 @@ class ProtocolCompilerService:
                             n_messages: Optional[int] = None,
                             max_fields: Optional[int] = None,
                             pattern: str = "auto",
+                            auth: Optional[str] = None,
                             run_spin: bool = False,
                             no_verify: bool = False,
                             no_impl: bool = False,
                             doc: bool = False,
                             export_spec: bool = False,
                             json_manifest: bool = False,
+                            fuzz: bool = False,
                             verbose: bool = False) -> MultiChainSuite:
         seed = seed_hex if seed_hex else make_seed()
         seed_bytes = bytes.fromhex(seed)
@@ -113,8 +122,11 @@ class ProtocolCompilerService:
             name_prefix=name_prefix,
             n_messages=n_messages,
             max_fields=max_fields,
-            pattern=pattern
+            pattern=pattern if pattern != "auto" else None,
         )
+        if auth and auth != "none":
+            for p in suite.protocols:
+                p.auth = auth
 
         log_seed(seed, suite.name)
         print(f"[gen_protocol]  multichain seed = {seed}")
@@ -147,6 +159,7 @@ class ProtocolCompilerService:
                 doc=doc,
                 export_spec=export_spec,
                 json_manifest=json_manifest,
+                fuzz=fuzz,
                 verbose=verbose
             )
 
@@ -164,6 +177,7 @@ class ProtocolCompilerService:
                          doc: bool = False,
                          export_spec: bool = False,
                          json_manifest: bool = False,
+                         fuzz: bool = False,
                          verbose: bool = False) -> Protocol:
         n = proto.name.lower()
         out = self.out_dir if self.out_dir else Path(f"out/{n}")
@@ -179,6 +193,16 @@ class ProtocolCompilerService:
             c_file = out / f"{n}.c"
             c_file.write_text(c_code)
             print(f"[gen_protocol]  wrote {c_file}")
+
+        if fuzz:
+            fuzz_code = FuzzHarnessEmitter(proto).emit()
+            fuzz_file = out / f"{n}_fuzz.c"
+            fuzz_file.write_text(fuzz_code)
+            print(f"[gen_protocol]  wrote {fuzz_file}")
+
+            corpus_dir = out / "corpus"
+            seeds = generate_seed_corpus(proto, corpus_dir)
+            print(f"[gen_protocol]  generated {len(seeds)} seed corpus frames in {corpus_dir}")
 
         if json_manifest:
             m_code = JsonManifestEmitter(proto).emit()

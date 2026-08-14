@@ -181,21 +181,25 @@ class ProtocolGenerator:
         desc = self._pick(desc_tmpl)
         return Message(name=name, opcode=op, fields=fields, direction=direction, description=desc)
 
-    def generate(self, *,
-                 name_hint: Optional[str] = None,
+    def generate(self,
+                 name: Optional[str] = None,
+                 pattern: Optional[str] = None,
+                 endian: Optional[str] = None,
                  n_messages: Optional[int] = None,
                  max_fields: Optional[int] = None,
-                 pattern: str = "auto") -> Protocol:
+                 auth: Optional[str] = None,
+                 *,
+                 name_hint: Optional[str] = None) -> Protocol:
+        name_val = name if name is not None else name_hint
+        name = self.proto_name(name_val)
+        pattern = pattern if pattern is not None else self._pick(PATTERNS)
+        endian = endian if endian is not None else self._pick(["little", "big"])
 
-        if pattern == "auto":
-            pattern = self._pick(PATTERNS)
-
-        name = self.proto_name(name_hint)
         v_maj = self.rng.randint(1, 5)
-        v_min = self.rng.randint(0, 15)
+        v_min = self.rng.randint(0, 9)
         v_pat = self.rng.randint(0, 99)
+
         magic = calculate_magic(name, self.seed)
-        endian = self._pick(["little", "big"])
 
         n_msg = n_messages if n_messages is not None else self.rng.randint(4, 16)
         m_fld = max_fields if max_fields is not None else self.rng.randint(3, 10)
@@ -241,6 +245,7 @@ class ProtocolGenerator:
             max_payload_size=max_pay,
             endian=endian,
             description=desc_map.get(pattern, "Custom binary protocol"),
+            auth=auth,
         )
 
     def generate_multichain(self, count: int, *,

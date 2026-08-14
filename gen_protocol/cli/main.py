@@ -31,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--fields",       type=int,       help="Max fields per struct (1..64, default: 3-10)")
     p.add_argument("-p", "--pattern",      choices=["auto"] + PATTERNS, default="auto", help="Protocol pattern (default: auto)")
     p.add_argument("-c", "--multichain", "--chains", type=int, metavar="COUNT", help="Generate a MultiChain suite of COUNT interconnected protocols (1..32)")
+    p.add_argument("--auth",               choices=["none", "hmac-sha256"], default="none", help="Frame authentication mechanism (default: none)")
+    p.add_argument("--fuzz",               action="store_true", help="Generate libFuzzer C harness and seed corpus")
     p.add_argument("--spec",               metavar="FILE", help="Compile protocol from YAML/JSON IDL specification file")
     p.add_argument("--export-spec",        action="store_true", help="Export declarative protocol.yaml IDL specification")
     p.add_argument("--doc",                action="store_true", help="Generate human-readable PROTOCOL_SPEC.md documentation")
@@ -78,12 +80,14 @@ def main(argv=None) -> int:
                 n_messages=args.messages,
                 max_fields=args.fields,
                 pattern=args.pattern,
+                auth=args.auth,
                 run_spin=args.spin,
                 no_verify=args.no_verify,
                 no_impl=args.no_impl,
                 doc=args.doc,
                 export_spec=args.export_spec,
                 json_manifest=args.json,
+                fuzz=args.fuzz,
                 verbose=args.verbose
             )
         elif args.spec:
@@ -96,6 +100,7 @@ def main(argv=None) -> int:
                 doc=args.doc,
                 export_spec=args.export_spec,
                 json_manifest=args.json,
+                fuzz=args.fuzz,
                 verbose=args.verbose
             )
         else:
@@ -105,12 +110,14 @@ def main(argv=None) -> int:
                 n_messages=args.messages,
                 max_fields=args.fields,
                 pattern=args.pattern,
+                auth=args.auth,
                 run_spin=args.spin,
                 no_verify=args.no_verify,
                 no_impl=args.no_impl,
                 doc=args.doc,
                 export_spec=args.export_spec,
                 json_manifest=args.json,
+                fuzz=args.fuzz,
                 verbose=args.verbose
             )
         return 0

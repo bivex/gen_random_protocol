@@ -45,6 +45,7 @@ class Protocol:
     max_payload_size: int
     endian: str                       # "little" | "big"
     description: str
+    auth: Optional[str] = None        # None | "hmac-sha256"
 
 
 @dataclass

@@ -31,14 +31,16 @@ int main(void) {{
 
     /* ---- header CRC round-trip ---- */
     {name}_hdr_t hdr;
-    {name}_hdr_init(&hdr, TEST_OPCODE, 0x1234u, 5u, 0);
-    hdr.crc32 = {name}_frame_crc(&hdr, NULL, 0);
+    uint8_t payload[1024] = {{0}};
+    uint16_t exp_len = {name}_expected_payload_len(TEST_OPCODE);
+    {name}_hdr_init(&hdr, TEST_OPCODE, 0x1234u, 5u, exp_len);
+    hdr.crc32 = {name}_frame_crc(&hdr, payload, exp_len);
     {name}_hdr_encode(&hdr);
     {name}_hdr_decode(&hdr);
-    if ({name}_hdr_validate(&hdr, NULL, 0) == 0) pass++; else fail++;   /* happy path */
+    if ({name}_hdr_validate(&hdr, payload, exp_len) == 0) pass++; else fail++;   /* happy path */
 
-    hdr.crc32 ^= 0xDEADBEEFu;                                          /* tamper crc field */
-    if ({name}_hdr_validate(&hdr, NULL, 0) == -5) pass++; else fail++; /* CRC mismatch */
+    hdr.crc32 ^= 0xDEADBEEFu;                                                  /* tamper crc field */
+    if ({name}_hdr_validate(&hdr, payload, exp_len) == -5) pass++; else fail++; /* CRC mismatch */
 
     /* ---- sliding-window anti-replay ---- */
     {name}_replay_state_t st = {{0}};

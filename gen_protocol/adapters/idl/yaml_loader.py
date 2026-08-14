@@ -193,6 +193,14 @@ class YamlSpecLoader(SpecLoader):
         max_pay = max((msg_wire_size(m) for m in messages), default=1024)
         max_pay = max(1024, ((max_pay + 3) // 4) * 4)
 
+        auth = p_info.get("auth")
+        if auth is not None:
+            auth = str(auth).lower().strip()
+            if auth not in ("none", "hmac-sha256"):
+                raise ValueError(f"protocol 'auth' must be 'none' or 'hmac-sha256', got {auth!r}")
+            if auth == "none":
+                auth = None
+
         return Protocol(
             name=name,
             version_major=v_maj,
@@ -207,4 +215,5 @@ class YamlSpecLoader(SpecLoader):
             max_payload_size=max_pay,
             endian=endian,
             description=p_info.get("description", "Compiled binary protocol"),
+            auth=auth,
         )

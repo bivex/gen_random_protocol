@@ -205,6 +205,20 @@ class CHeaderEmitter(CodeEmitter):
     def _prototypes(self) -> str:
         p = self.p
         n = p.name.lower()
+        auth_protos = []
+        if p.auth == "hmac-sha256":
+            auth_protos = [
+                "",
+                "/* === HMAC-SHA256 Frame Authentication API === */",
+                f"#define {p.name}_AUTH_ENABLED 1",
+                f"#define {p.name}_MAC_SIZE 32U",
+                f"int  {n}_const_time_memcmp(const void *a, const void *b, size_t len);",
+                f"void {n}_frame_mac(const {p.header_struct_name} *hdr, const void *payload, size_t payload_len, "
+                f"const uint8_t *key, size_t key_len, uint8_t mac_out[32]);",
+                f"int  {n}_mac_verify(const {p.header_struct_name} *hdr, const void *payload, size_t payload_len, "
+                f"const uint8_t *mac, const uint8_t *key, size_t key_len);",
+            ]
+
         return "\n".join([
             "/* === Header Validation Return Codes === */",
             f"typedef enum {{",
@@ -214,7 +228,9 @@ class CHeaderEmitter(CodeEmitter):
             f"    {p.name}_HDR_ERR_PAYLOAD_TOO_BIG = -3,  /* Payload length exceeds MAX_PAYLOAD */",
             f"    {p.name}_HDR_ERR_LEN_MISMATCH    = -4,  /* Payload length mismatch */",
             f"    {p.name}_HDR_ERR_CRC             = -5,  /* CRC-32 checksum error */",
-            f"    {p.name}_HDR_ERR_OPCODE          = -6   /* Unknown or unsupported opcode */",
+            f"    {p.name}_HDR_ERR_OPCODE          = -6,  /* Unknown or unsupported opcode */",
+            f"    {p.name}_HDR_ERR_LEN_SCHEMA      = -7,  /* Payload length does not match message schema */",
+            f"    {p.name}_HDR_ERR_AUTH_FAIL       = -8   /* HMAC-SHA256 authentication verification failed */",
             f"}} {n}_hdr_err_t;",
             "",
             "/* === API prototypes === */",
@@ -222,6 +238,7 @@ class CHeaderEmitter(CodeEmitter):
             f"                   uint32_t session_id, uint32_t sequence, uint16_t payload_len);",
             f"void {n}_hdr_encode({p.header_struct_name} *hdr);",
             f"void {n}_hdr_decode({p.header_struct_name} *hdr);",
+            f"uint16_t {n}_expected_payload_len(uint16_t opcode);",
             "",
             f"uint32_t {n}_crc32(const void *data, size_t len);",
             f"/* Note: {n}_frame_crc expects hdr in HOST byte order. It internally converts to wire order for CRC calculation. */",
@@ -243,6 +260,7 @@ class CHeaderEmitter(CodeEmitter):
             f" * delivery within the window; rejects replays and stale frames. */",
             f"bool {n}_replay_check({n}_replay_state_t *st, uint32_t seq);",
             f"const char *{n}_opcode_str(uint16_t opcode);",
+            *auth_protos,
             "",
             "/* === Per-message payload serialization prototypes === */",
             "\n".join([
