@@ -14,6 +14,7 @@ from gen_protocol.adapters.emitters.promela import PromelaEmitter
 from gen_protocol.adapters.emitters.markdown_doc import MarkdownDocEmitter
 from gen_protocol.adapters.emitters.json_manifest import JsonManifestEmitter
 from gen_protocol.adapters.emitters.yaml_spec import YamlSpecEmitter
+from gen_protocol.adapters.emitters.protobuf import ProtobufEmitter
 from gen_protocol.adapters.emitters.multichain_doc import MultiChainMarkdownEmitter
 from gen_protocol.adapters.emitters.multichain_manifest import MultiChainManifestEmitter
 
@@ -188,6 +189,25 @@ class TestEmittersUnit(unittest.TestCase):
         self.assertIn("`0x12345678`", doc_text)
         self.assertIn("TEST_PROTO_MSG_CONNECT", doc_text)
         self.assertIn("## 4. Message Payloads", doc_text)
+
+    def test_protobuf_emitter(self):
+        emitter = ProtobufEmitter(self.proto_le)
+        proto_text = emitter.emit()
+
+        self.assertIn('syntax = "proto3";', proto_text)
+        self.assertIn("package test_le;", proto_text)
+        self.assertIn("enum TestStatus", proto_text)
+        self.assertIn("STATUS_OK = 0;", proto_text)
+        self.assertIn("enum Opcode {", proto_text)
+        self.assertIn("OPCODE_UNSPECIFIED = 0;", proto_text)
+        self.assertIn("OPCODE_TEST_PROTO_MSG_CONNECT = 1;", proto_text)
+        self.assertIn("message Header {", proto_text)
+        self.assertIn("message TestProtoMsgConnect {", proto_text)
+        self.assertIn("bytes raw_buf = 6;", proto_text)
+        self.assertIn("message Frame {", proto_text)
+        self.assertIn("oneof payload {", proto_text)
+        self.assertIn("service TestLeService {", proto_text)
+        self.assertIn("rpc Exchange (Frame) returns (Frame);", proto_text)
 
     def test_multichain_emitters(self):
         gen = ProtocolGenerator(Random(42), "42"*16)

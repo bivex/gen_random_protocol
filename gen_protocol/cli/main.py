@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fuzz",               action="store_true", help="Generate libFuzzer C harness and seed corpus")
     p.add_argument("--spec",               metavar="FILE", help="Compile protocol from YAML/JSON IDL specification file")
     p.add_argument("--export-spec",        action="store_true", help="Export declarative protocol.yaml IDL specification")
+    p.add_argument("--proto", "--protobuf", action="store_true", help="Generate Protocol Buffers (proto3) schema definition (.proto)")
     p.add_argument("--doc",                action="store_true", help="Generate human-readable PROTOCOL_SPEC.md documentation")
     p.add_argument("--spin",               action="store_true", help="Generate Promela model and run SPIN verification")
     p.add_argument("--no-verify",          action="store_true", help="Generate Promela model file (.pml) but skip SPIN verification")
@@ -88,6 +89,7 @@ def main(argv=None) -> int:
                 export_spec=args.export_spec,
                 json_manifest=args.json,
                 fuzz=args.fuzz,
+                proto=args.proto,
                 verbose=args.verbose
             )
         elif args.spec:
@@ -101,6 +103,7 @@ def main(argv=None) -> int:
                 export_spec=args.export_spec,
                 json_manifest=args.json,
                 fuzz=args.fuzz,
+                proto=args.proto,
                 verbose=args.verbose
             )
         else:
@@ -118,6 +121,7 @@ def main(argv=None) -> int:
                 export_spec=args.export_spec,
                 json_manifest=args.json,
                 fuzz=args.fuzz,
+                proto=args.proto,
                 verbose=args.verbose
             )
         return 0

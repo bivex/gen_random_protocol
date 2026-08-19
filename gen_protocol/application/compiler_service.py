@@ -16,6 +16,7 @@ from gen_protocol.adapters.emitters.promela import PromelaEmitter
 from gen_protocol.adapters.emitters.markdown_doc import MarkdownDocEmitter
 from gen_protocol.adapters.emitters.json_manifest import JsonManifestEmitter
 from gen_protocol.adapters.emitters.yaml_spec import YamlSpecEmitter
+from gen_protocol.adapters.emitters.protobuf import ProtobufEmitter
 from gen_protocol.adapters.emitters.multichain_doc import MultiChainMarkdownEmitter
 from gen_protocol.adapters.emitters.multichain_manifest import MultiChainManifestEmitter
 from gen_protocol.adapters.idl.yaml_loader import YamlSpecLoader
@@ -37,11 +38,12 @@ class ProtocolCompilerService:
                           export_spec: bool = False,
                           json_manifest: bool = False,
                           fuzz: bool = False,
+                          proto: bool = False,
                           verbose: bool = False) -> Protocol:
         loader = YamlSpecLoader()
-        proto = loader.load(spec_path, seed=seed_hex)
+        loaded_proto = loader.load(spec_path, seed=seed_hex)
         return self._emit_and_verify(
-            proto,
+            loaded_proto,
             run_spin=run_spin,
             no_verify=no_verify,
             no_impl=no_impl,
@@ -49,6 +51,7 @@ class ProtocolCompilerService:
             export_spec=export_spec,
             json_manifest=json_manifest,
             fuzz=fuzz,
+            emit_proto=proto,
             verbose=verbose
         )
 
@@ -66,6 +69,7 @@ class ProtocolCompilerService:
                         export_spec: bool = False,
                         json_manifest: bool = False,
                         fuzz: bool = False,
+                        proto: bool = False,
                         verbose: bool = False) -> Protocol:
         seed = seed_hex if seed_hex else make_seed()
         seed_bytes = bytes.fromhex(seed)
@@ -73,7 +77,7 @@ class ProtocolCompilerService:
         rng = Random(seed_int)
 
         gen = ProtocolGenerator(rng, seed)
-        proto = gen.generate(
+        generated_proto = gen.generate(
             name=name_hint,
             n_messages=n_messages,
             max_fields=max_fields,
@@ -81,11 +85,11 @@ class ProtocolCompilerService:
             auth=auth if auth != "none" else None,
         )
 
-        log_seed(seed, proto.name)
+        log_seed(seed, generated_proto.name)
         print(f"[gen_protocol]  seed = {seed}")
 
         return self._emit_and_verify(
-            proto,
+            generated_proto,
             run_spin=run_spin,
             no_verify=no_verify,
             no_impl=no_impl,
@@ -93,6 +97,7 @@ class ProtocolCompilerService:
             export_spec=export_spec,
             json_manifest=json_manifest,
             fuzz=fuzz,
+            emit_proto=proto,
             verbose=verbose
         )
 
@@ -110,6 +115,7 @@ class ProtocolCompilerService:
                             export_spec: bool = False,
                             json_manifest: bool = False,
                             fuzz: bool = False,
+                            proto: bool = False,
                             verbose: bool = False) -> MultiChainSuite:
         seed = seed_hex if seed_hex else make_seed()
         seed_bytes = bytes.fromhex(seed)
@@ -149,10 +155,10 @@ class ProtocolCompilerService:
             print(f"[gen_protocol]  wrote {manifest_file}")
 
         # Emit each chain protocol link into its subdirectory
-        for i, proto in enumerate(suite.protocols):
-            sub_service = ProtocolCompilerService(out_dir=suite_dir / proto.name.lower())
+        for i, proto_link in enumerate(suite.protocols):
+            sub_service = ProtocolCompilerService(out_dir=suite_dir / proto_link.name.lower())
             sub_service._emit_and_verify(
-                proto,
+                proto_link,
                 run_spin=run_spin,
                 no_verify=no_verify,
                 no_impl=no_impl,
@@ -160,6 +166,7 @@ class ProtocolCompilerService:
                 export_spec=export_spec,
                 json_manifest=json_manifest,
                 fuzz=fuzz,
+                emit_proto=proto,
                 verbose=verbose
             )
 
@@ -178,6 +185,7 @@ class ProtocolCompilerService:
                          export_spec: bool = False,
                          json_manifest: bool = False,
                          fuzz: bool = False,
+                         emit_proto: bool = False,
                          verbose: bool = False) -> Protocol:
         n = proto.name.lower()
         out = self.out_dir if self.out_dir else Path(f"out/{n}")
@@ -215,6 +223,11 @@ class ProtocolCompilerService:
             y_file = out / "protocol.yaml"
             y_file.write_text(y_code)
             print(f"[gen_protocol]  wrote {y_file}")
+
+        if proto_code := (ProtobufEmitter(proto).emit() if emit_proto else None):
+            pb_file = out / f"{n}.proto"
+            pb_file.write_text(proto_code)
+            print(f"[gen_protocol]  wrote {pb_file}")
 
         if doc:
             d_code = MarkdownDocEmitter(proto).emit()

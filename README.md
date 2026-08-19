@@ -9,7 +9,7 @@
 
 **gen_protocol.py** is a high-performance **binary protocol generator, MultiChain suite builder, and IDL compiler** for C, structured on **Domain-Driven Design (DDD) & Hexagonal Architecture**. 
 
-It produces cryptographically seeded C binary protocols, multi-node **MultiChain interconnected network suites**, or compiles declarative **YAML/JSON IDL** schemas into portable C headers (`.h`), implementation stubs (`.c`), formal **Promela SPIN** verification models (`.pml`), machine-readable manifests (`.json`), and human-readable **RFC Markdown specifications** (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`).
+It produces cryptographically seeded C binary protocols, multi-node **MultiChain interconnected network suites**, or compiles declarative **YAML/JSON IDL** schemas into portable C headers (`.h`), implementation stubs (`.c`), formal **Promela SPIN** verification models (`.pml`), **Protocol Buffers proto3** schemas (`.proto`), machine-readable manifests (`.json`), and human-readable **RFC Markdown specifications** (`PROTOCOL_SPEC.md` / `MULTICHAIN_SPEC.md`).
 
 ---
 
@@ -32,8 +32,9 @@ It produces cryptographically seeded C binary protocols, multi-node **MultiChain
    │            Domain Layer            │    │            Adapters Layer          │
    │  - ProtocolGenerator               │    │  - CHeaderEmitter (.h)             │
    │  - MultiChainSuite entity          │    │  - CSourceEmitter (.c)             │
-   │  - 22B Wire Header rules           │    │  - PromelaEmitter (.pml)           │
-   │  - CRC-32 & Byte Swapping rules    │    │  - SpinVerifier (SPIN CLI)         │
+   │  - 22B Wire Header rules           │    │  - ProtobufEmitter (.proto)        │
+   │  - CRC-32 & Byte Swapping rules    │    │  - PromelaEmitter (.pml)           │
+   │                                    │    │  - SpinVerifier (SPIN CLI)         │
    └────────────────────────────────────┘    └────────────────────────────────────┘
 ```
 
@@ -44,6 +45,7 @@ It produces cryptographically seeded C binary protocols, multi-node **MultiChain
 | Feature | Description & Implementation Guarantees |
 |---------|------------------------------------------|
 | **MultiChain Protocol Suites** | Generate $N$ interconnected protocols (`-c N` / `--multichain N`) with cross-chain bridge frame tunneling (`*_MSG_BRIDGE_TO_*`). |
+| **Protocol Buffers (Proto3)** | Generate standards-compliant Protocol Buffers (`.proto`) schemas (`--proto` / `--protobuf`) with wire header, enums, payload messages, oneof frame envelope, and typed gRPC services. |
 | **22-Byte Frame Header** | Fixed 22-byte canonical wire header (`magic`, `version`, `opcode`, `session_id`, `sequence`, `payload_len`, `crc32`). |
 | **HMAC-SHA256 Authentication** | Embedded zero-dependency FIPS 180-4 / RFC 2104 MAC authentication (`--auth hmac-sha256`) with constant-time verification. |
 | **libFuzzer Harness & Corpus** | Standalone fuzz target generation (`--fuzz`) with automated seed corpus synthesis for continuous ASan/UBSan fuzzing. |
@@ -115,14 +117,14 @@ All frames transmitted over the wire begin with the fixed 22-byte header:
 ## 🚀 Quick Start
 
 ```bash
-# 1. Generate a fully random protocol with SPIN verification, YAML IDL export, and Markdown spec
-python3 gen_protocol.py -n MY_PROTO -p rpc --spin --export-spec --doc
+# 1. Generate a fully random protocol with SPIN verification, Proto3 schema, YAML IDL export, and Markdown spec
+python3 gen_protocol.py -n MY_PROTO -p rpc --spin --proto --export-spec --doc
 
-# 2. Generate a MultiChain suite of 5 interconnected protocols with cross-chain tunneling
-python3 gen_protocol.py --multichain 5 --spin --doc --json
+# 2. Generate a MultiChain suite of 5 interconnected protocols with cross-chain tunneling and Proto3 schemas
+python3 gen_protocol.py --multichain 5 --proto --spin --doc --json
 
-# 3. Compile C code and Promela verification model from a declarative protocol.yaml IDL
-python3 gen_protocol.py --spec protocol.yaml --spin -o out/my_proto_compiled
+# 3. Compile C code, Proto3 schema, and Promela verification model from a declarative protocol.yaml IDL
+python3 gen_protocol.py --spec protocol.yaml --proto --spin -o out/my_proto_compiled
 
 # 4. Reproduce a past run via seed
 python3 gen_protocol.py --seed 807d5084d2da4e06178c1062a4ef9abd --spin
@@ -145,6 +147,7 @@ python3 gen_protocol.py --list-seeds
 | `-p` | `--pattern P` | Protocol pattern (`auto`, `reqrsp`, `stream`, `pubsub`, `rpc`, `fsm`) | `auto` |
 | | `--spec FILE` | Compile protocol from YAML or JSON IDL specification | — |
 | | `--export-spec`| Export declarative `protocol.yaml` IDL specification | `off` |
+| | `--proto`, `--protobuf` | Generate Protocol Buffers (proto3) schema definition (`.proto`) | `off` |
 | | `--doc` | Generate human-readable `PROTOCOL_SPEC.md` documentation | `off` |
 | | `--spin` | Generate Promela model and run SPIN formal verification | `off` |
 | | `--no-verify` | Generate Promela `.pml` file but skip running SPIN | `off` |
